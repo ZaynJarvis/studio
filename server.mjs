@@ -27,6 +27,7 @@ const dataDir = resolve(process.env.DATA_DIR || join(appDir, ".data"));
 const publicDataDir = join(dataDir, "public");
 const artifactsDir = join(publicDataDir, "artifacts");
 const coversDir = join(publicDataDir, "covers");
+const inputsDir = join(publicDataDir, "inputs");
 const tasksFile = join(dataDir, "tasks.json");
 const publicTasksFile = join(publicDataDir, "tasks.json");
 const arkApiKey = process.env.ARK_API_KEY || "";
@@ -36,8 +37,9 @@ const arkTitleModel = process.env.ARK_TITLE_MODEL || "ep-20260512155127-ngn88";
 const arkTitleTimeoutMs = Number(process.env.ARK_TITLE_TIMEOUT_MS || 6000);
 const monitorMode = process.env.TASK_MONITOR_MODE === "webhook" ? "webhook" : "poll";
 const callbackBaseUrl = (process.env.ARK_CALLBACK_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+const publicBaseUrl = (process.env.PUBLIC_BASE_URL || process.env.ARK_CALLBACK_BASE_URL || "").replace(/\/+$/, "");
 const webhookToken = process.env.ARK_WEBHOOK_TOKEN || process.env.WEBHOOK_TOKEN || process.env.MCP_TOKEN || "";
-const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 5 * 1024 * 1024);
+const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
 const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1024);
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]);
@@ -49,6 +51,7 @@ const coverInflight = new Set();
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(artifactsDir, { recursive: true });
 mkdirSync(coversDir, { recursive: true });
+mkdirSync(inputsDir, { recursive: true });
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -59,9 +62,11 @@ const contentTypes = {
   ".json": "application/json; charset=utf-8",
   ".mov": "video/quicktime",
   ".mp4": "video/mp4",
+  ".png": "image/png",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
   ".webmanifest": "application/manifest+json",
+  ".webp": "image/webp",
   ".webm": "video/webm",
 };
 
@@ -287,6 +292,13 @@ function publicThumbUrl(value) {
   return raw;
 }
 
+function publicMediaUrl(path) {
+  if (!path) return null;
+  if (String(path).startsWith("http://") || String(path).startsWith("https://")) return path;
+  if (!publicBaseUrl) return path;
+  return new URL(path, publicBaseUrl).toString();
+}
+
 function publicText(value, max = 4000) {
   const raw = String(value || "");
   return raw.length > max ? `${raw.slice(0, max)}...` : raw;
@@ -322,6 +334,8 @@ function publicTask(task) {
     camera: task.camera,
     seed: task.seed,
     image_id: task.imageId || null,
+    reference_image_url: publicMediaUrl(task.inputImageUrl) || null,
+    reference_image_bytes: task.inputImageBytes || null,
     thumb: publicThumbUrl(task.coverUrl || task.thumb),
     created_at: task.createdAt,
     updated_at: task.updatedAt,
@@ -336,6 +350,50 @@ function sanitizeFilePart(value) {
     .replace(/[^a-zA-Z0-9_-]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 120) || randomUUID();
+}
+
+function decodeDataImageUrl(value) {
+  const match = String(value || "").match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([a-zA-Z0-9+/=\s]+)$/i);
+  if (!match) return null;
+
+  const mime = match[1].toLowerCase().replace("image/jpg", "image/jpeg");
+  const ext = mime === "image/png" ? ".png" : mime === "image/webp" ? ".webp" : ".jpg";
+  const base64 = match[2].replace(/\s+/g, "");
+  const buffer = Buffer.from(base64, "base64");
+
+  if (!buffer.length) {
+    throw httpError(400, "image_invalid", "Reference image data is empty.");
+  }
+  if (buffer.length > maxImageBytes) {
+    throw httpError(413, "image_too_large", "Reference image is larger than MAX_IMAGE_BYTES.");
+  }
+
+  return { buffer, mime, ext };
+}
+
+function persistInputImage(imageUrl) {
+  if (!imageUrl || !String(imageUrl).startsWith("data:")) return null;
+  const decoded = decodeDataImageUrl(imageUrl);
+  if (!decoded) {
+    throw httpError(400, "image_invalid", "Reference image must be a JPEG, PNG, or WEBP data URL.");
+  }
+
+  if (!publicBaseUrl) {
+    throw httpError(500, "public_base_url_missing", "PUBLIC_BASE_URL is required to upload inline reference images.");
+  }
+
+  const filename = `${randomUUID()}${decoded.ext}`;
+  const finalPath = join(inputsDir, filename);
+  writeFileSync(finalPath, decoded.buffer);
+
+  const mediaPath = `/media/inputs/${filename}`;
+  return {
+    url: publicMediaUrl(mediaPath),
+    mediaPath,
+    path: `inputs/${filename}`,
+    bytes: decoded.buffer.length,
+    mime: decoded.mime,
+  };
 }
 
 function artifactExtension(sourceUrl, contentType) {
@@ -522,10 +580,11 @@ function normalizeGenerateInput(input) {
     throw httpError(400, "prompt_required", "Prompt is required.");
   }
 
-  const imageUrl = input.image_url || input.imageUrl || input.image?.src || null;
-  if (imageUrl && imageUrl.startsWith("data:") && Buffer.byteLength(imageUrl, "utf8") > maxImageBytes) {
-    throw httpError(413, "image_too_large", "Reference image is too large for inline upload.");
-  }
+  const rawImageUrl = input.image_url || input.imageUrl || input.image?.src || null;
+  const persistedImage = persistInputImage(rawImageUrl);
+  const imageUrl = persistedImage?.url || rawImageUrl;
+  const rawThumb = input.thumb || rawImageUrl || null;
+  const thumb = persistedImage?.mediaPath || (String(rawThumb || "").startsWith("data:") ? null : rawThumb) || imageUrl || null;
 
   const mode = imageUrl ? "i2v" : "t2v";
   const duration = clampInt(input.duration_seconds ?? input.duration, 5, 15, 5);
@@ -539,8 +598,12 @@ function normalizeGenerateInput(input) {
   return {
     prompt,
     imageUrl,
+    inputImagePath: persistedImage?.path || null,
+    inputImageUrl: persistedImage?.mediaPath || imageUrl || null,
+    inputImageBytes: persistedImage?.bytes || null,
+    inputImageMime: persistedImage?.mime || null,
     imageId: input.image_id || input.imageId || null,
-    thumb: input.thumb || imageUrl || null,
+    thumb,
     mode,
     duration,
     seed,
@@ -790,6 +853,10 @@ async function createVideoTask(rawInput) {
     camera: input.camera,
     seed: input.seed,
     imageId: input.imageId,
+    inputImagePath: input.inputImagePath,
+    inputImageUrl: input.inputImageUrl,
+    inputImageBytes: input.inputImageBytes,
+    inputImageMime: input.inputImageMime,
     thumb: input.thumb,
     videoUrl: null,
     sourceVideoUrl: null,
@@ -843,6 +910,12 @@ async function handleDeleteTask(req, res, id) {
     const coverPath = resolve(publicDataDir, task.coverPath);
     if (coverPath.startsWith(publicDataDir)) {
       try { rmSync(coverPath, { force: true }); } catch {}
+    }
+  }
+  if (task.inputImagePath) {
+    const inputImagePath = resolve(publicDataDir, task.inputImagePath);
+    if (inputImagePath.startsWith(publicDataDir)) {
+      try { rmSync(inputImagePath, { force: true }); } catch {}
     }
   }
 
@@ -1240,6 +1313,7 @@ createServer(async (req, res) => {
       data_dir: dataDir,
       artifacts: [...tasks.values()].filter((task) => task.artifactUrl).length,
       covers: [...tasks.values()].filter((task) => task.coverUrl).length,
+      input_images: [...tasks.values()].filter((task) => task.inputImagePath).length,
     });
     return;
   }

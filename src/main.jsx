@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { StoreProvider, useHashRoute } from './store';
-import { Nav, HomePage, CreatePage, PreviewPage, LibraryPage, ServerTaskSync } from './pages';
+import { Nav, HomePage, CreatePage, PreviewPage, LibraryPage, QueuePage, ServerTaskSync } from './pages';
 import './themes.css';
 
 function App() {
@@ -13,6 +13,7 @@ function App() {
       if (e.key === "1") route.navigate("/");
       if (e.key === "2") route.navigate("/create");
       if (e.key === "3") route.navigate("/library");
+      if (e.key === "4") route.navigate("/queue");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -22,6 +23,7 @@ function App() {
   if (route.path === "/create") Page = CreatePage;
   else if (route.path === "/preview") Page = PreviewPage;
   else if (route.path === "/library") Page = LibraryPage;
+  else if (route.path === "/queue") Page = QueuePage;
 
   return (
     <div className="app">

@@ -133,10 +133,13 @@ export function ServerTaskSync() {
 }
 
 export function Nav({ route, navigate }) {
+  const { state } = useStore();
+  const activeCount = state.videos.filter((v) => isActiveTask(v.status)).length;
   const items = [
     { path: "/", icon: "home", label: "Home", kbd: "1" },
     { path: "/create", icon: "sparkle", label: "Create", kbd: "2" },
     { path: "/library", icon: "grid", label: "Library", kbd: "3" },
+    { path: "/queue", icon: "refresh", label: "Queue", kbd: activeCount ? String(activeCount) : "4" },
   ];
 
   return (
@@ -218,6 +221,52 @@ function VideoCard({ v, onClick, onTemplate }) {
   );
 }
 
+function QueueEmptyState({ onCreate }) {
+  return (
+    <div className="queue-empty">
+      <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", marginBottom: 8 }}>
+        No pending tasks
+      </div>
+      <p style={{ margin: "0 0 14px", color: "var(--fg-2)", lineHeight: 1.55 }}>
+        New renders appear here immediately after submission. You can close the tab; the server keeps the task record and this list reloads from `/api/tasks`.
+      </p>
+      <button className="btn btn-primary" onClick={onCreate}>
+        <Icon name="plus" size={14}/> New render
+      </button>
+    </div>
+  );
+}
+
+function PendingTaskList({ videos, navigate, onTemplate }) {
+  const activeVideos = videos.filter((v) => isActiveTask(v.status));
+
+  return (
+    <>
+      <SectionHeader title="Pending Tasks" sub="server ledger · visible after tab close · supports parallel renders" count={activeVideos.length} />
+      <div className="queue-note">
+        <span className={activeVideos.length ? "spinner" : "queue-dot"} />
+        <span>{activeVideos.length
+          ? "Rendering tasks are tracked by the server. Open any card to watch its preview placeholder."
+          : "This queue is empty now. It will stay visible so you always know where in-flight renders go."}</span>
+      </div>
+      {activeVideos.length > 0 ? (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
+          {activeVideos.map((v) => (
+            <VideoCard
+              key={v.id}
+              v={v}
+              onClick={() => navigate("/preview", { id: v.id })}
+              onTemplate={() => onTemplate(v)}
+            />
+          ))}
+        </div>
+      ) : (
+        <QueueEmptyState onCreate={() => navigate("/create")} />
+      )}
+    </>
+  );
+}
+
 export function HomePage() {
   const { state } = useStore();
   const { navigate } = useHashRoute();
@@ -269,18 +318,9 @@ export function HomePage() {
         </div>
       </section>
 
-      {activeVideos.length > 0 && (
-        <section style={{ padding: "32px 64px 0" }}>
-          <SectionHeader title="Rendering Queue" sub="server tasks · close tab anytime · previews arrive here" count={activeVideos.length} />
-          <div className="queue-note">
-            <span className="spinner" />
-            <span>These tasks are saved on the server. Reopen Home or Library to recover every running render, including parallel submissions.</span>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
-            {activeVideos.map((v) => <VideoCard key={v.id} v={v} onClick={() => navigate("/preview", { id: v.id })} onTemplate={() => applyTemplate(v)} />)}
-          </div>
-        </section>
-      )}
+      <section style={{ padding: "32px 64px 0" }}>
+        <PendingTaskList videos={videos} navigate={navigate} onTemplate={applyTemplate} />
+      </section>
 
       <section style={{ padding: "32px 64px 64px" }}>
         <SectionHeader title="Dailies" sub="recent finished takes · click to revisit · grab as template" count={readyVideos.length} />
@@ -751,6 +791,49 @@ export function PreviewPage() {
   );
 }
 
+export function QueuePage() {
+  const { state } = useStore();
+  const { navigate } = useHashRoute();
+  const videos = useMemo(() => [...state.videos].sort(taskSort), [state.videos]);
+  const activeVideos = videos.filter((v) => isActiveTask(v.status));
+  const completed = videos.filter((v) => !isActiveTask(v.status)).slice(0, 8);
+  const applyTemplate = (v) => navigate("/create", { from: v.id });
+
+  return (
+    <div style={{ padding: "32px 64px", maxWidth: 1500, margin: "0 auto" }}>
+      <header style={{ marginBottom: 28, display: "flex", alignItems: "end", justifyContent: "space-between", gap: 16 }}>
+        <div>
+          <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 6 }}>
+            Server task ledger
+          </div>
+          <h1 className="display" style={{ fontSize: 40, margin: 0 }}>
+            Queue
+          </h1>
+        </div>
+        <button className="btn btn-primary" onClick={() => navigate("/create")}>
+          <Icon name="plus" size={14}/> New render
+        </button>
+      </header>
+
+      <PendingTaskList videos={videos} navigate={navigate} onTemplate={applyTemplate} />
+
+      <section style={{ marginTop: 42 }}>
+        <SectionHeader title="Recent Previews" sub="completed tasks from the same server ledger" count={completed.length} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18 }}>
+          {completed.map((v) => (
+            <VideoCard
+              key={v.id}
+              v={v}
+              onClick={() => navigate("/preview", { id: v.id })}
+              onTemplate={() => applyTemplate(v)}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function LibraryPage() {
   const { state, removeImage, removeVideo, addImage } = useStore();
   const { navigate } = useHashRoute();
@@ -844,12 +927,12 @@ export function LibraryPage() {
 
       {tab === "videos" && (
         <>
-          {activeVideos.length > 0 && (
-            <div className="queue-note" style={{ marginBottom: 18 }}>
-              <span className="spinner" />
-              <span>{activeVideos.length} rendering task{activeVideos.length > 1 ? "s" : ""} are tracked by the server and will update here when ready.</span>
-            </div>
-          )}
+          <div className="queue-note" style={{ marginBottom: 18 }}>
+            <span className={activeVideos.length ? "spinner" : "queue-dot"} />
+            <span>{activeVideos.length
+              ? `${activeVideos.length} rendering task${activeVideos.length > 1 ? "s" : ""} are tracked by the server and will update here when ready.`
+              : "No pending tasks right now. The Queue page remains available from the sidebar."}</span>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18 }}>
           {state.videos.length === 0 && (
             <div className="muted" style={{ gridColumn: "1/-1", padding: 64, textAlign: "center" }}>

@@ -46,6 +46,7 @@ const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]);
 const pollTimers = new Map();
 const pollInflight = new Set();
+const submissionInflight = new Set();
 const artifactInflight = new Set();
 const coverInflight = new Set();
 
@@ -79,7 +80,9 @@ for (const task of tasks.values()) {
     task.title = normalizedTitle;
     task.updatedAt = Date.now();
   }
-  if (monitorMode === "poll" && !terminalStatuses.has(task.status)) {
+  if (!task.arkTaskId && !terminalStatuses.has(task.status)) {
+    scheduleArkSubmit(task.id, 1500);
+  } else if (monitorMode === "poll" && !terminalStatuses.has(task.status)) {
     schedulePoll(task.id, 1500);
   }
   if (task.status === "succeeded" && (task.sourceVideoUrl || task.videoUrl) && !task.artifactUrl) {
@@ -659,8 +662,7 @@ function toArkBody(input, localTaskId) {
   return body;
 }
 
-async function createArkTask(input) {
-  const localTaskId = randomUUID();
+async function createArkTask(input, localTaskId = randomUUID()) {
   const body = toArkBody(input, localTaskId);
   const result = await arkFetch("/contents/generations/tasks", {
     method: "POST",
@@ -834,15 +836,14 @@ async function handleGenerate(req, res) {
 
 async function createVideoTask(rawInput) {
   const input = normalizeGenerateInput(rawInput);
-  input.title = await generateTaskTitle(input);
-  const { localTaskId, arkTaskId } = await createArkTask(input);
+  const localTaskId = randomUUID();
   const now = Date.now();
-  const id = monitorMode === "webhook" ? localTaskId : arkTaskId;
+  const id = localTaskId;
   const task = {
     id,
-    arkTaskId,
+    arkTaskId: null,
     status: "queued",
-    progress: monitorMode === "poll" ? 3 : null,
+    progress: monitorMode === "poll" ? 1 : null,
     title: input.title,
     prompt: input.prompt,
     uiModel: input.uiModel,
@@ -870,14 +871,98 @@ async function createVideoTask(rawInput) {
     pollCount: 0,
     monitorMode,
     callbackUrl: monitorMode === "webhook" ? callbackUrlForTask(localTaskId) : null,
+    submissionStatus: "pending",
   };
 
   tasks.set(id, task);
   saveTasks();
-  if (monitorMode === "poll") {
-    schedulePoll(id, 1500);
-  }
+  scheduleArkSubmit(id, 0);
   return task;
+}
+
+function inputFromTask(task) {
+  return {
+    prompt: task.prompt,
+    imageUrl: publicMediaUrl(task.inputImageUrl) || null,
+    resolution: task.resolution,
+    aspect: task.aspect,
+    duration: task.duration,
+    camera: task.camera,
+    seed: task.seed,
+    arkModel: task.arkModel || resolveModel(),
+  };
+}
+
+function scheduleArkSubmit(id, delayMs = 0) {
+  const task = tasks.get(id);
+  if (!task || task.arkTaskId || terminalStatuses.has(task.status) || submissionInflight.has(id)) return;
+
+  const timer = setTimeout(() => {
+    submitArkTask(id).catch((error) => {
+      console.error(`task submit failed ${id}`, publicError(error));
+    });
+  }, delayMs);
+  timer.unref?.();
+}
+
+async function updateTaskTitle(id, input) {
+  const title = await generateTaskTitle(input);
+  const task = tasks.get(id);
+  if (!task || task.title === title) return;
+
+  task.title = title;
+  task.updatedAt = Date.now();
+  saveTasks();
+}
+
+async function submitArkTask(id) {
+  const task = tasks.get(id);
+  if (!task || task.arkTaskId || terminalStatuses.has(task.status) || submissionInflight.has(id)) return;
+
+  submissionInflight.add(id);
+  try {
+    task.submissionStatus = "submitting";
+    task.lastSubmitError = null;
+    task.updatedAt = Date.now();
+    saveTasks();
+
+    const input = inputFromTask(task);
+    updateTaskTitle(id, input).catch((error) => {
+      console.warn(`title update failed ${id}`, publicError(error));
+    });
+
+    const { arkTaskId } = await createArkTask(input, id);
+    const latest = tasks.get(id);
+    if (!latest) return;
+
+    latest.arkTaskId = arkTaskId;
+    latest.status = normalizeStatus(latest.status || "queued");
+    latest.submissionStatus = "submitted";
+    latest.updatedAt = Date.now();
+    latest.pollCount = latest.pollCount || 0;
+    tasks.set(id, latest);
+    saveTasks();
+
+    if (monitorMode === "poll") {
+      schedulePoll(id, 1500);
+    }
+    console.log(`task submit: ${id} -> ${arkTaskId}`);
+  } catch (error) {
+    const failed = tasks.get(id);
+    if (failed) {
+      failed.status = "failed";
+      failed.error = publicError(error);
+      failed.finishedAt = Date.now();
+      failed.updatedAt = Date.now();
+      failed.submissionStatus = "failed";
+      failed.lastSubmitError = publicError(error);
+      tasks.set(id, failed);
+      saveTasks();
+    }
+    throw error;
+  } finally {
+    submissionInflight.delete(id);
+  }
 }
 
 async function handleGetTask(req, res, id) {
@@ -887,7 +972,9 @@ async function handleGetTask(req, res, id) {
     return;
   }
 
-  if (monitorMode === "poll" && !terminalStatuses.has(task.status) && Date.now() - (task.lastPolledAt || 0) > 4_000) {
+  if (!task.arkTaskId && !terminalStatuses.has(task.status)) {
+    scheduleArkSubmit(id, 0);
+  } else if (monitorMode === "poll" && !terminalStatuses.has(task.status) && Date.now() - (task.lastPolledAt || 0) > 4_000) {
     schedulePoll(id, 0);
   }
 
@@ -948,6 +1035,9 @@ async function handleArkWebhook(req, res, url) {
     return;
   }
 
+  if (arkTaskId && !task.arkTaskId) {
+    task.arkTaskId = arkTaskId;
+  }
   applyArkResult(task, body);
   task.lastWebhookAt = Date.now();
   task.lastPollError = null;

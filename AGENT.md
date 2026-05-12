@@ -41,7 +41,8 @@ index.html          — Google Fonts links, data-theme="studio" on <body>
 ## Key conventions
 
 - **Mode is implicit**: if reference image is present → I→V, otherwise → T→V. No mode toggle
-- **API key**: stored in localStorage via sidebar popover. Generate button is gated — shows warning if key is empty
+- **Ark API key**: held by the server (`ARK_API_KEY` env). The frontend never sees it
+- **Web access gate**: if `WEB_ACCESS_TOKEN` is set on the server, the SPA shows a login screen on first load; the token is stored in `localStorage["vgs.accessToken"]` and sent as `Authorization: Bearer ...` (or `?access_token=...`) on every `/api/*` and `/state/tasks.json` call. `/healthz`, `/media/*`, and static assets stay open. Leaving the env unset disables the gate (dev mode)
 - **Template flow**: any video can prefill Create via `?from=<videoId>` query param
 - **Seed data**: 6 sample videos + 3 images ship by default (Google public sample videos + Unsplash thumbnails)
 - **No backend yet**: generation is faked with `setInterval` progress + random sample video assignment

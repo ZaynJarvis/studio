@@ -39,6 +39,7 @@ const monitorMode = process.env.TASK_MONITOR_MODE === "webhook" ? "webhook" : "p
 const callbackBaseUrl = (process.env.ARK_CALLBACK_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || process.env.ARK_CALLBACK_BASE_URL || "").replace(/\/+$/, "");
 const webhookToken = process.env.ARK_WEBHOOK_TOKEN || process.env.WEBHOOK_TOKEN || process.env.MCP_TOKEN || "";
+const webAccessToken = process.env.WEB_ACCESS_TOKEN || "";
 const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
 const maxJsonBodyBytes = Number(process.env.MAX_JSON_BODY_BYTES || Math.ceil(maxImageBytes * 1.5) + 1024 * 1024);
 const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1024);
@@ -1065,6 +1066,14 @@ function mcpAuthorized(req, url) {
   return bearer === process.env.MCP_TOKEN || queryToken === process.env.MCP_TOKEN;
 }
 
+function webAuthorized(req, url) {
+  if (!webAccessToken) return true;
+  const header = String(req.headers.authorization || "");
+  const bearer = header.match(/^Bearer\s+(.+)$/i)?.[1] || "";
+  const queryToken = url.searchParams.get("access_token") || "";
+  return bearer === webAccessToken || queryToken === webAccessToken;
+}
+
 function mcpTools() {
   return [
     {
@@ -1256,8 +1265,32 @@ async function handleMcp(req, res, url) {
 
 async function routeApi(req, res, url) {
   try {
+    if (url.pathname === "/api/auth/config") {
+      sendJson(res, 200, { authRequired: Boolean(webAccessToken) });
+      return true;
+    }
+
+    if (url.pathname === "/api/auth/verify") {
+      if (!webAuthorized(req, url)) {
+        sendJson(res, 401, { error: { code: "unauthorized", message: "Invalid access token." } });
+      } else {
+        sendJson(res, 200, { ok: true });
+      }
+      return true;
+    }
+
     if (url.pathname === "/mcp") {
       await handleMcp(req, res, url);
+      return true;
+    }
+
+    if (url.pathname === "/api/ark/webhook" && req.method === "POST") {
+      await handleArkWebhook(req, res, url);
+      return true;
+    }
+
+    if (url.pathname.startsWith("/api/") && !webAuthorized(req, url)) {
+      sendJson(res, 401, { error: { code: "unauthorized", message: "Sign in to continue." } });
       return true;
     }
 
@@ -1268,11 +1301,6 @@ async function routeApi(req, res, url) {
 
     if (url.pathname === "/api/tasks" && req.method === "GET") {
       await handleListTasks(req, res);
-      return true;
-    }
-
-    if (url.pathname === "/api/ark/webhook" && req.method === "POST") {
-      await handleArkWebhook(req, res, url);
       return true;
     }
 
@@ -1434,6 +1462,10 @@ createServer(async (req, res) => {
   }
 
   if (url.pathname === "/state/tasks.json") {
+    if (!webAuthorized(req, url)) {
+      sendJson(res, 401, { error: { code: "unauthorized", message: "Sign in to continue." } });
+      return;
+    }
     if (!existsSync(publicTasksFile)) {
       saveTasks();
     }

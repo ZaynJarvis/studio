@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { StoreProvider, useHashRoute } from './store';
 import { Nav, HomePage, CreatePage, PreviewPage, LibraryPage, ServerTaskSync } from './pages';
+import { AuthGate } from './auth';
 import './themes.css';
 
 function App() {
@@ -35,5 +36,7 @@ function App() {
 }
 
 createRoot(document.getElementById("root")).render(
-  <StoreProvider><App /></StoreProvider>
+  <AuthGate>
+    <StoreProvider><App /></StoreProvider>
+  </AuthGate>
 );

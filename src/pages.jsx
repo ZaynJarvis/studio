@@ -13,7 +13,22 @@ const HOST_PARAMS = {
   ],
 };
 
-const ACTIVE_TASK_STATUSES = new Set(["queued", "running", "pending", "processing"]);
+const ACTIVE_TASK_STATUSES = new Set([
+  "created",
+  "queued",
+  "running",
+  "pending",
+  "processing",
+  "rendering",
+  "submitted",
+  "scheduled",
+  "waiting",
+  "not_started",
+  "in_queue",
+  "in_progress",
+  "executing",
+  "started",
+]);
 const TERMINAL_TASK_STATUSES = new Set(["succeeded", "failed", "cancelled", "expired"]);
 
 function isActiveTask(status) {
@@ -116,15 +131,25 @@ export function ServerTaskSync() {
 
       if (!stopped) {
         const hasActive = videosRef.current.some((v) => isActiveTask(v.status));
-        timer = setTimeout(sync, hasActive ? 3000 : 15000);
+        timer = setTimeout(sync, hasActive ? 2500 : 5000);
       }
     };
 
     sync();
+    const syncNow = () => {
+      if (timer) clearTimeout(timer);
+      sync();
+    };
+    window.addEventListener("focus", syncNow);
+    window.addEventListener("hashchange", syncNow);
+    document.addEventListener("visibilitychange", syncNow);
 
     return () => {
       stopped = true;
       if (timer) clearTimeout(timer);
+      window.removeEventListener("focus", syncNow);
+      window.removeEventListener("hashchange", syncNow);
+      document.removeEventListener("visibilitychange", syncNow);
     };
   }, [updateVideo, upsertVideo]);
 

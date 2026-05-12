@@ -114,8 +114,8 @@ function normalizeResolution(value) {
 
 function normalizeStatus(status) {
   const raw = String(status || "queued").toLowerCase();
-  if (raw === "pending") return "queued";
-  if (raw === "processing") return "running";
+  if (["created", "pending", "submitted", "scheduled", "waiting", "not_started", "in_queue"].includes(raw)) return "queued";
+  if (["processing", "rendering", "in_progress", "executing", "started"].includes(raw)) return "running";
   if (raw === "completed" || raw === "complete") return "succeeded";
   if (raw === "error") return "failed";
   return raw;
@@ -633,7 +633,12 @@ function schedulePoll(id, delayMs) {
 }
 
 async function handleGenerate(req, res) {
-  const input = normalizeGenerateInput(await readJson(req));
+  const task = await createVideoTask(await readJson(req));
+  sendJson(res, 202, publicTask(task));
+}
+
+async function createVideoTask(rawInput) {
+  const input = normalizeGenerateInput(rawInput);
   input.title = await generateTaskTitle(input);
   const { localTaskId, arkTaskId } = await createArkTask(input);
   const now = Date.now();
@@ -673,7 +678,7 @@ async function handleGenerate(req, res) {
   if (monitorMode === "poll") {
     schedulePoll(id, 1500);
   }
-  sendJson(res, 202, publicTask(task));
+  return task;
 }
 
 async function handleGetTask(req, res, id) {
@@ -732,8 +737,210 @@ async function handleListTasks(req, res) {
   sendJson(res, 200, { tasks: items });
 }
 
+function mcpAuthorized(req, url) {
+  if (!process.env.MCP_TOKEN) return true;
+  const header = String(req.headers.authorization || "");
+  const bearer = header.match(/^Bearer\s+(.+)$/i)?.[1] || "";
+  const queryToken = url.searchParams.get("access_token") || "";
+  return bearer === process.env.MCP_TOKEN || queryToken === process.env.MCP_TOKEN;
+}
+
+function mcpTools() {
+  return [
+    {
+      name: "create_video_task",
+      description: "Create a Seedance 2.0 Pro video generation task and persist it in the server queue.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "Video prompt. Required." },
+          image_url: { type: "string", description: "Optional reference image URL for image-to-video." },
+          image_id: { type: "string", description: "Optional reference image id." },
+          thumb: { type: "string", description: "Optional thumbnail URL." },
+          resolution: { type: "string", enum: ["720p", "1080p", "2K"], default: "1080p" },
+          aspect: { type: "string", enum: ["16:9", "9:16", "1:1"], default: "16:9" },
+          duration: { type: "integer", minimum: 5, maximum: 15, default: 5 },
+          camera: { type: "string", enum: ["fixed", "dynamic"], default: "dynamic" },
+          seed: { type: "integer", default: -1 },
+        },
+        required: ["prompt"],
+        additionalProperties: true,
+      },
+    },
+    {
+      name: "get_video_task",
+      description: "Fetch a persisted video task by local task id.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Local task id returned by create_video_task." },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "list_video_tasks",
+      description: "List persisted video tasks from the shared server queue.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          status: { type: "string", description: "Optional status filter." },
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+        },
+        additionalProperties: false,
+      },
+    },
+  ];
+}
+
+function mcpTextResult(payload) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: typeof payload === "string" ? payload : JSON.stringify(payload, null, 2),
+      },
+    ],
+  };
+}
+
+async function callMcpTool(name, args = {}) {
+  if (name === "create_video_task") {
+    const task = await createVideoTask({ ...args, model: "seedance-pro" });
+    return mcpTextResult({ task: publicTask(task) });
+  }
+
+  if (name === "get_video_task") {
+    const task = tasks.get(String(args.id || ""));
+    if (!task) {
+      throw httpError(404, "task_not_found", "Task not found.");
+    }
+    return mcpTextResult({ task: publicTask(task) });
+  }
+
+  if (name === "list_video_tasks") {
+    const status = args.status ? normalizeStatus(args.status) : null;
+    const limit = clampInt(args.limit, 1, 100, 20);
+    const items = [...tasks.values()]
+      .filter((task) => !status || task.status === status)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+      .slice(0, limit)
+      .map(publicTask);
+    return mcpTextResult({ tasks: items });
+  }
+
+  throw httpError(404, "tool_not_found", `Unknown MCP tool: ${name}`);
+}
+
+async function handleMcpRpc(message) {
+  const id = message?.id;
+  const method = message?.method;
+  const params = message?.params || {};
+
+  try {
+    if (method === "initialize") {
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          protocolVersion: params.protocolVersion || "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "videogen", version: "1.0.0" },
+        },
+      };
+    }
+
+    if (method === "notifications/initialized") {
+      return null;
+    }
+
+    if (method === "ping") {
+      return { jsonrpc: "2.0", id, result: {} };
+    }
+
+    if (method === "tools/list") {
+      return { jsonrpc: "2.0", id, result: { tools: mcpTools() } };
+    }
+
+    if (method === "tools/call") {
+      const result = await callMcpTool(params.name, params.arguments || {});
+      return { jsonrpc: "2.0", id, result };
+    }
+
+    return {
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32601, message: `Method not found: ${method}` },
+    };
+  } catch (error) {
+    return {
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: error.status || -32000,
+        message: error.message || "MCP tool failed.",
+        data: publicError(error),
+      },
+    };
+  }
+}
+
+async function handleMcp(req, res, url) {
+  if (!mcpAuthorized(req, url)) {
+    sendJson(res, 401, { error: { code: "unauthorized", message: "Invalid MCP token." } });
+    return;
+  }
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET,POST,OPTIONS",
+      "access-control-allow-headers": "authorization,content-type",
+    });
+    res.end();
+    return;
+  }
+
+  if (req.method === "GET") {
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    res.write("event: endpoint\n");
+    res.write("data: /mcp\n\n");
+    res.write("event: tools\n");
+    res.write(`data: ${JSON.stringify({ tools: mcpTools().map((tool) => tool.name) })}\n\n`);
+    res.end();
+    return;
+  }
+
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: { code: "method_not_allowed", message: "MCP supports GET and POST." } });
+    return;
+  }
+
+  const body = await readJson(req);
+  const batch = Array.isArray(body) ? body : [body];
+  const responses = (await Promise.all(batch.map(handleMcpRpc))).filter(Boolean);
+
+  if (responses.length === 0) {
+    res.writeHead(202, { "cache-control": "no-store" });
+    res.end();
+    return;
+  }
+
+  sendJson(res, 200, Array.isArray(body) ? responses : responses[0]);
+}
+
 async function routeApi(req, res, url) {
   try {
+    if (url.pathname === "/mcp") {
+      await handleMcp(req, res, url);
+      return true;
+    }
+
     if (url.pathname === "/api/generate" && req.method === "POST") {
       await handleGenerate(req, res);
       return true;

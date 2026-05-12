@@ -68,6 +68,11 @@ const contentTypes = {
 let tasks = loadTasks();
 
 for (const task of tasks.values()) {
+  const normalizedTitle = limitTitle(task.title || titleFromPrompt(task.prompt));
+  if (normalizedTitle !== task.title) {
+    task.title = normalizedTitle;
+    task.updatedAt = Date.now();
+  }
   if (monitorMode === "poll" && !terminalStatuses.has(task.status)) {
     schedulePoll(task.id, 1500);
   }
@@ -177,7 +182,8 @@ function limitTitle(title, fallback = "Untitled take") {
 }
 
 function titleFromPrompt(prompt) {
-  return limitTitle((prompt.split(/[.,;\n，。；]/)[0] || "Untitled take").trim());
+  const raw = String(prompt || "");
+  return limitTitle((raw.split(/[.,;\n，。；]/)[0] || "Untitled take").trim());
 }
 
 function cleanGeneratedTitle(text, fallback) {

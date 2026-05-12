@@ -1,6 +1,7 @@
 import { useState, useRef, useMemo, useEffect } from 'react';
 import { Icon, DropZone, VideoPlayer, GenerationProgress, useToast } from './components';
 import { useStore, useHashRoute, relTime, fmtDate } from './store';
+import { authHeader, clearToken, getToken } from './auth';
 
 const HOST_PARAMS = {
   resolutions: ["720p", "1080p", "2K"],
@@ -89,8 +90,21 @@ function taskSort(a, b) {
   return (b.createdAt || 0) - (a.createdAt || 0);
 }
 
-async function fetchJson(path, options) {
-  const res = await fetch(path, options);
+async function fetchJson(path, options = {}) {
+  const merged = {
+    ...options,
+    headers: { ...(options.headers || {}), ...authHeader() },
+  };
+  const res = await fetch(path, merged);
+  if (res.status === 401) {
+    if (getToken()) {
+      clearToken();
+      window.location.reload();
+    }
+    const error = new Error("Session expired. Sign in again.");
+    error.status = 401;
+    throw error;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const error = new Error(data.error?.message || `Request failed with HTTP ${res.status}`);

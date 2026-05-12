@@ -20,6 +20,9 @@ const tasksFile = join(dataDir, "tasks.json");
 const arkApiKey = process.env.ARK_API_KEY || "";
 const arkBaseUrl = (process.env.ARK_API_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3").replace(/\/+$/, "");
 const arkParamStyle = process.env.ARK_PARAM_STYLE || "inline";
+const monitorMode = process.env.TASK_MONITOR_MODE === "webhook" ? "webhook" : "poll";
+const callbackBaseUrl = (process.env.ARK_CALLBACK_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+const webhookToken = process.env.ARK_WEBHOOK_TOKEN || process.env.WEBHOOK_TOKEN || process.env.MCP_TOKEN || "";
 const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 5 * 1024 * 1024);
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]);
@@ -41,7 +44,7 @@ const contentTypes = {
 let tasks = loadTasks();
 
 for (const task of tasks.values()) {
-  if (!terminalStatuses.has(task.status)) {
+  if (monitorMode === "poll" && !terminalStatuses.has(task.status)) {
     schedulePoll(task.id, 1500);
   }
 }
@@ -99,6 +102,20 @@ function resolveModel(uiModel, mode) {
   return process.env.ARK_MODEL_PRO || "doubao-seedance-2-0-260128";
 }
 
+function callbackUrlForTask(id) {
+  if (monitorMode !== "webhook") return null;
+  if (!callbackBaseUrl) {
+    throw httpError(500, "callback_base_url_missing", "ARK_CALLBACK_BASE_URL or PUBLIC_BASE_URL is required in webhook mode.");
+  }
+
+  const url = new URL("/api/ark/webhook", callbackBaseUrl);
+  url.searchParams.set("task_id", id);
+  if (webhookToken) {
+    url.searchParams.set("token", webhookToken);
+  }
+  return url.toString();
+}
+
 function titleFromPrompt(prompt) {
   return (prompt.split(/[.,;\n，。；]/)[0] || "Untitled take").trim().slice(0, 80);
 }
@@ -139,6 +156,7 @@ function publicTask(task) {
     updated_at: task.updatedAt,
     finished_at: task.finishedAt || null,
     last_poll_error: task.lastPollError || null,
+    monitor_mode: task.monitorMode || monitorMode,
   };
 }
 
@@ -179,7 +197,7 @@ function normalizeGenerateInput(input) {
   };
 }
 
-function toArkBody(input) {
+function toArkBody(input, localTaskId) {
   const flags = [
     `--rs ${input.resolution}`,
     `--rt ${input.aspect}`,
@@ -202,6 +220,11 @@ function toArkBody(input) {
     content,
   };
 
+  const callbackUrl = callbackUrlForTask(localTaskId);
+  if (callbackUrl) {
+    body.callback_url = callbackUrl;
+  }
+
   if (useFields) {
     body.resolution = input.resolution;
     body.ratio = input.aspect;
@@ -217,7 +240,8 @@ function toArkBody(input) {
 }
 
 async function createArkTask(input) {
-  const body = toArkBody(input);
+  const localTaskId = randomUUID();
+  const body = toArkBody(input, localTaskId);
   const result = await arkFetch("/contents/generations/tasks", {
     method: "POST",
     body: JSON.stringify(body),
@@ -227,7 +251,7 @@ async function createArkTask(input) {
     throw httpError(502, "upstream_bad_response", "Ark did not return a task id.");
   }
 
-  return result.id;
+  return { localTaskId, arkTaskId: result.id };
 }
 
 async function getArkTask(taskId) {
@@ -301,28 +325,35 @@ function normalizeArkResult(raw) {
   };
 }
 
+function applyArkResult(task, raw) {
+  const next = normalizeArkResult(raw);
+  task.status = next.status;
+  task.videoUrl = next.videoUrl || task.videoUrl || null;
+  task.error = next.error;
+  task.updatedAt = Date.now();
+  task.progress = estimateProgress(task);
+  task.rawMeta = next.rawMeta;
+
+  if (terminalStatuses.has(task.status)) {
+    task.finishedAt = Date.now();
+    task.progress = task.status === "succeeded" ? 100 : task.progress;
+  }
+
+  return task;
+}
+
 async function pollTask(id, reason = "timer") {
+  if (monitorMode !== "poll") return;
   const task = tasks.get(id);
   if (!task || terminalStatuses.has(task.status) || pollInflight.has(id)) return;
 
   pollInflight.add(id);
   try {
     const raw = await getArkTask(task.arkTaskId);
-    const next = normalizeArkResult(raw);
-    task.status = next.status;
-    task.videoUrl = next.videoUrl || task.videoUrl || null;
-    task.error = next.error;
-    task.updatedAt = Date.now();
+    applyArkResult(task, raw);
     task.lastPolledAt = Date.now();
     task.lastPollError = null;
     task.pollCount = (task.pollCount || 0) + 1;
-    task.progress = estimateProgress(task);
-    task.rawMeta = next.rawMeta;
-
-    if (terminalStatuses.has(task.status)) {
-      task.finishedAt = Date.now();
-      task.progress = task.status === "succeeded" ? 100 : task.progress;
-    }
 
     saveTasks();
     if (!terminalStatuses.has(task.status)) {
@@ -370,9 +401,9 @@ function schedulePoll(id, delayMs) {
 
 async function handleGenerate(req, res) {
   const input = normalizeGenerateInput(await readJson(req));
-  const arkTaskId = await createArkTask(input);
+  const { localTaskId, arkTaskId } = await createArkTask(input);
   const now = Date.now();
-  const id = arkTaskId || randomUUID();
+  const id = monitorMode === "webhook" ? localTaskId : arkTaskId;
   const task = {
     id,
     arkTaskId,
@@ -395,11 +426,15 @@ async function handleGenerate(req, res) {
     createdAt: now,
     updatedAt: now,
     pollCount: 0,
+    monitorMode,
+    callbackUrl: monitorMode === "webhook" ? callbackUrlForTask(localTaskId) : null,
   };
 
   tasks.set(id, task);
   saveTasks();
-  schedulePoll(id, 1500);
+  if (monitorMode === "poll") {
+    schedulePoll(id, 1500);
+  }
   sendJson(res, 202, publicTask(task));
 }
 
@@ -410,11 +445,42 @@ async function handleGetTask(req, res, id) {
     return;
   }
 
-  if (!terminalStatuses.has(task.status) && Date.now() - (task.lastPolledAt || 0) > 4_000) {
+  if (monitorMode === "poll" && !terminalStatuses.has(task.status) && Date.now() - (task.lastPolledAt || 0) > 4_000) {
     schedulePoll(id, 0);
   }
 
   sendJson(res, 200, publicTask(task));
+}
+
+async function handleArkWebhook(req, res, url) {
+  if (webhookToken) {
+    const provided = url.searchParams.get("token") || req.headers["x-videogen-webhook-token"] || "";
+    if (provided !== webhookToken) {
+      sendJson(res, 401, { error: { code: "unauthorized", message: "Invalid webhook token." } });
+      return;
+    }
+  }
+
+  const body = await readJson(req);
+  const id = url.searchParams.get("task_id") || body.id || body.task_id;
+  const arkTaskId = body.id || body.task_id;
+  let task = id ? tasks.get(id) : null;
+
+  if (!task && arkTaskId) {
+    task = [...tasks.values()].find((item) => item.arkTaskId === arkTaskId) || null;
+  }
+
+  if (!task) {
+    sendJson(res, 404, { error: { code: "task_not_found", message: "Task not found for webhook." } });
+    return;
+  }
+
+  applyArkResult(task, body);
+  task.lastWebhookAt = Date.now();
+  task.lastPollError = null;
+  tasks.set(task.id, task);
+  saveTasks();
+  sendJson(res, 200, { ok: true, task: publicTask(task) });
 }
 
 async function handleListTasks(req, res) {
@@ -434,6 +500,11 @@ async function routeApi(req, res, url) {
 
     if (url.pathname === "/api/tasks" && req.method === "GET") {
       await handleListTasks(req, res);
+      return true;
+    }
+
+    if (url.pathname === "/api/ark/webhook" && req.method === "POST") {
+      await handleArkWebhook(req, res, url);
       return true;
     }
 
@@ -520,7 +591,13 @@ createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
   if (url.pathname === "/healthz") {
-    sendJson(res, 200, { ok: true, ark: Boolean(arkApiKey), tasks: tasks.size });
+    sendJson(res, 200, {
+      ok: true,
+      ark: Boolean(arkApiKey),
+      tasks: tasks.size,
+      monitor_mode: monitorMode,
+      webhook_ready: monitorMode === "webhook" ? Boolean(callbackBaseUrl) : false,
+    });
     return;
   }
 
@@ -551,4 +628,5 @@ createServer(async (req, res) => {
 }).listen(port, "0.0.0.0", () => {
   console.log(`videogen listening on :${port}`);
   console.log(`task store: ${tasksFile}`);
+  console.log(`task monitor mode: ${monitorMode}`);
 });

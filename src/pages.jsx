@@ -23,12 +23,16 @@ function isActiveTask(status) {
 
 function videoPatchFromTask(task, current = {}) {
   const status = task.status || current.status || "queued";
+  const monitorMode = task.monitor_mode || current.monitorMode || "poll";
+  const progress = task.progress ?? (monitorMode === "webhook" && isActiveTask(status) ? null : current.progress ?? 0);
+
   return {
     id: current.id || task.id,
     taskId: task.id,
     arkTaskId: task.task_id,
     status,
-    progress: task.progress ?? current.progress ?? 0,
+    progress,
+    monitorMode,
     title: task.title || current.title || "Untitled take",
     prompt: task.prompt || current.prompt || "",
     src: task.video_url || current.src || "",
@@ -46,6 +50,26 @@ function videoPatchFromTask(task, current = {}) {
     updatedAt: task.updated_at || Date.now(),
     finishedAt: task.finished_at || current.finishedAt,
   };
+}
+
+function taskRuntimeText(v) {
+  if (!isActiveTask(v.status)) return `${v.duration}s · ${v.resolution}`;
+  if (v.monitorMode === "poll" && Number.isFinite(v.progress)) return `${Math.round(v.progress)}%`;
+  return "preview later";
+}
+
+function taskBadgeText(v) {
+  const active = isActiveTask(v.status);
+  const failed = TERMINAL_TASK_STATUSES.has(v.status) && v.status !== "succeeded";
+  if (active && v.monitorMode === "webhook") return "RENDERING";
+  if (active || failed) return String(v.status || "queued").toUpperCase();
+  return v.mode === "i2v" ? "I→V" : "T→V";
+}
+
+function taskSort(a, b) {
+  const activeDelta = Number(isActiveTask(b.status)) - Number(isActiveTask(a.status));
+  if (activeDelta) return activeDelta;
+  return (b.createdAt || 0) - (a.createdAt || 0);
 }
 
 async function fetchJson(path, options) {
@@ -74,11 +98,18 @@ export function ServerTaskSync() {
         const data = await fetchJson("/api/tasks");
         if (stopped) return;
 
-        for (const task of data.tasks || []) {
+        const remoteTasks = data.tasks || [];
+        for (const task of remoteTasks) {
           const local = videosRef.current.find((v) => v.taskId === task.id || v.id === task.id);
           const patch = videoPatchFromTask(task, local || { id: task.id });
           if (local) updateVideo(local.id, patch);
           else upsertVideo(patch);
+        }
+
+        const remoteHasActive = remoteTasks.some((task) => isActiveTask(task.status));
+        if (remoteHasActive) {
+          timer = setTimeout(sync, 3000);
+          return;
         }
       } catch {
         // The app can still render seed/local videos if the API is unavailable.
@@ -155,8 +186,7 @@ function SectionHeader({ title, sub, count }) {
 
 function VideoCard({ v, onClick, onTemplate }) {
   const active = isActiveTask(v.status);
-  const failed = TERMINAL_TASK_STATUSES.has(v.status) && v.status !== "succeeded";
-  const badge = active ? v.status.toUpperCase() : failed ? v.status.toUpperCase() : (v.mode === "i2v" ? "I→V" : "T→V");
+  const badge = taskBadgeText(v);
 
   return (
     <article className="video-card" onClick={onClick}>
@@ -164,9 +194,9 @@ function VideoCard({ v, onClick, onTemplate }) {
         {v.thumb
           ? <img src={v.thumb} alt="" loading="lazy"/>
           : <div style={{ width: "100%", height: "100%", background: "linear-gradient(135deg,#222,#000)" }}/>}
-        <div className="play"><div className="play-ic"><Icon name={active ? "refresh" : "play"} size={16}/></div></div>
+        <div className="play"><div className={"play-ic" + (active ? " play-ic-active" : "")}><Icon name={active ? "refresh" : "play"} size={16}/></div></div>
         <div className="video-badge">{badge}</div>
-        <div className="video-runtime">{active ? `${Math.round(v.progress || 0)}%` : `${v.duration}s · ${v.resolution}`}</div>
+        <div className="video-runtime">{taskRuntimeText(v)}</div>
       </div>
       <div className="video-meta">
         <h3 className="video-title">{v.title}</h3>
@@ -191,7 +221,9 @@ function VideoCard({ v, onClick, onTemplate }) {
 export function HomePage() {
   const { state } = useStore();
   const { navigate } = useHashRoute();
-  const videos = state.videos;
+  const videos = useMemo(() => [...state.videos].sort(taskSort), [state.videos]);
+  const activeVideos = videos.filter((v) => isActiveTask(v.status));
+  const readyVideos = videos.filter((v) => !isActiveTask(v.status));
 
   const applyTemplate = (v) => {
     navigate("/create", { from: v.id });
@@ -232,14 +264,28 @@ export function HomePage() {
           <div>BAY · 02</div>
           <div>FPS · 24</div>
           <div>STOCK · {videos.length.toString().padStart(2, "0")} TAKES</div>
-          <div style={{ color: "var(--accent-2)" }}>● REC READY</div>
+          <div>QUEUE · {activeVideos.length.toString().padStart(2, "0")} TASKS</div>
+          <div style={{ color: activeVideos.length ? "var(--accent)" : "var(--accent-2)" }}>● {activeVideos.length ? "RENDERING" : "REC READY"}</div>
         </div>
       </section>
 
+      {activeVideos.length > 0 && (
+        <section style={{ padding: "32px 64px 0" }}>
+          <SectionHeader title="Rendering Queue" sub="server tasks · close tab anytime · previews arrive here" count={activeVideos.length} />
+          <div className="queue-note">
+            <span className="spinner" />
+            <span>These tasks are saved on the server. Reopen Home or Library to recover every running render, including parallel submissions.</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
+            {activeVideos.map((v) => <VideoCard key={v.id} v={v} onClick={() => navigate("/preview", { id: v.id })} onTemplate={() => applyTemplate(v)} />)}
+          </div>
+        </section>
+      )}
+
       <section style={{ padding: "32px 64px 64px" }}>
-        <SectionHeader title="Dailies" sub="recent takes · click to revisit · grab as template" count={videos.length} />
+        <SectionHeader title="Dailies" sub="recent finished takes · click to revisit · grab as template" count={readyVideos.length} />
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
-          {videos.map((v) => <VideoCard key={v.id} v={v} onClick={() => navigate("/preview", { id: v.id })} onTemplate={() => applyTemplate(v)} />)}
+          {readyVideos.map((v) => <VideoCard key={v.id} v={v} onClick={() => navigate("/preview", { id: v.id })} onTemplate={() => applyTemplate(v)} />)}
         </div>
       </section>
     </div>
@@ -299,7 +345,7 @@ function GenerationOverlay({ progress, label }) {
     }}>
       <GenerationProgress progress={progress} label={label}/>
       <div className="mono muted" style={{ fontSize: 11, letterSpacing: ".15em", textTransform: "uppercase", maxWidth: 420, textAlign: "center", lineHeight: 1.7 }}>
-        Seedance is rendering on the cloud. The server will keep polling even if this tab is closed.
+        The task is saved on the server. You can close this tab and find it later in the Rendering Queue or Library.
       </div>
     </div>
   );
@@ -526,6 +572,7 @@ function TaskWaitPanel({ v }) {
   const status = String(v.status || "queued");
   const failed = TERMINAL_TASK_STATUSES.has(status) && status !== "succeeded";
   const label = failed ? status : status === "running" ? "Rendering task" : "Queued task";
+  const showProgress = v.monitorMode === "poll" && Number.isFinite(v.progress);
 
   return (
     <div style={{
@@ -545,8 +592,23 @@ function TaskWaitPanel({ v }) {
               {v.error?.message || "Seedance did not return a playable video."}
             </p>
           </>
-        ) : (
+        ) : showProgress ? (
           <GenerationProgress progress={v.progress || 0} label={label} />
+        ) : (
+          <div className="rendering-state" aria-live="polite">
+            <div className="rendering-mark">
+              <Icon name="refresh" size={28}/>
+            </div>
+            <div className="mono" style={{ fontSize: 10, letterSpacing: ".2em", textTransform: "uppercase", color: "var(--accent)", marginBottom: 12 }}>
+              Rendering
+            </div>
+            <h2 className="display" style={{ color: "#fff", fontSize: 30, margin: "0 0 12px", lineHeight: 1.1 }}>
+              Preview will appear here later.
+            </h2>
+            <p style={{ color: "rgba(255,255,255,.72)", maxWidth: 520, lineHeight: 1.55, margin: "0 auto" }}>
+              This task is stored on the server. You can close this tab; reopen Home, Library, or this preview page to see the result after the callback arrives.
+            </p>
+          </div>
         )}
       </div>
     </div>
@@ -695,6 +757,8 @@ export function LibraryPage() {
   const [tab, setTab] = useState("images");
   const { show, node } = useToast();
   const inputRef = useRef(null);
+  const libraryVideos = useMemo(() => [...state.videos].sort(taskSort), [state.videos]);
+  const activeVideos = libraryVideos.filter((v) => isActiveTask(v.status));
 
   const onUpload = (files) => {
     if (!files) return;
@@ -779,13 +843,20 @@ export function LibraryPage() {
       )}
 
       {tab === "videos" && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18 }}>
+        <>
+          {activeVideos.length > 0 && (
+            <div className="queue-note" style={{ marginBottom: 18 }}>
+              <span className="spinner" />
+              <span>{activeVideos.length} rendering task{activeVideos.length > 1 ? "s" : ""} are tracked by the server and will update here when ready.</span>
+            </div>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18 }}>
           {state.videos.length === 0 && (
             <div className="muted" style={{ gridColumn: "1/-1", padding: 64, textAlign: "center" }}>
               No videos yet. Generate one from Create.
             </div>
           )}
-          {state.videos.map((v) => (
+          {libraryVideos.map((v) => (
             <div key={v.id} style={{ position: "relative" }}>
               <VideoCard v={v}
                 onClick={() => navigate("/preview", { id: v.id })}
@@ -797,7 +868,8 @@ export function LibraryPage() {
               </button>
             </div>
           ))}
-        </div>
+          </div>
+        </>
       )}
     </div>
   );

@@ -20,6 +20,8 @@ const tasksFile = join(dataDir, "tasks.json");
 const arkApiKey = process.env.ARK_API_KEY || "";
 const arkBaseUrl = (process.env.ARK_API_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3").replace(/\/+$/, "");
 const arkParamStyle = process.env.ARK_PARAM_STYLE || "inline";
+const arkTitleModel = process.env.ARK_TITLE_MODEL || "ep-20260512155127-ngn88";
+const arkTitleTimeoutMs = Number(process.env.ARK_TITLE_TIMEOUT_MS || 6000);
 const monitorMode = process.env.TASK_MONITOR_MODE === "webhook" ? "webhook" : "poll";
 const callbackBaseUrl = (process.env.ARK_CALLBACK_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const webhookToken = process.env.ARK_WEBHOOK_TOKEN || process.env.WEBHOOK_TOKEN || process.env.MCP_TOKEN || "";
@@ -120,6 +122,95 @@ function titleFromPrompt(prompt) {
   return (prompt.split(/[.,;\n，。；]/)[0] || "Untitled take").trim().slice(0, 80);
 }
 
+function cleanGeneratedTitle(text, fallback) {
+  const title = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  if (!title) return fallback;
+
+  return title
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/^[#*\-\s]+/, "")
+    .replace(/[.。!！?？:：;；]+$/g, "")
+    .trim()
+    .slice(0, 80) || fallback;
+}
+
+function extractResponseText(raw) {
+  if (typeof raw?.output_text === "string") return raw.output_text;
+
+  const texts = [];
+  const collectContent = (content) => {
+    if (typeof content === "string") {
+      texts.push(content);
+      return;
+    }
+    if (!Array.isArray(content)) return;
+    for (const item of content) {
+      if (typeof item?.text === "string") texts.push(item.text);
+      if (typeof item?.output_text === "string") texts.push(item.output_text);
+    }
+  };
+
+  if (Array.isArray(raw?.output)) {
+    for (const item of raw.output) {
+      if (typeof item?.text === "string") texts.push(item.text);
+      collectContent(item?.content);
+    }
+  }
+
+  if (Array.isArray(raw?.choices)) {
+    for (const choice of raw.choices) {
+      collectContent(choice?.message?.content);
+      if (typeof choice?.message?.content === "string") texts.push(choice.message.content);
+      if (typeof choice?.text === "string") texts.push(choice.text);
+    }
+  }
+
+  return texts.join("\n").trim();
+}
+
+async function generateTaskTitle(input) {
+  const fallback = titleFromPrompt(input.prompt);
+  if (!arkTitleModel) return fallback;
+
+  const content = [];
+  if (input.imageUrl) {
+    content.push({ type: "input_image", image_url: input.imageUrl });
+  }
+  content.push({
+    type: "input_text",
+    text: [
+      "Create a concise title for a video generation task.",
+      "Return only the title, in English, 3 to 8 words, no quotes.",
+      `Video prompt: ${input.prompt}`,
+    ].join("\n"),
+  });
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), arkTitleTimeoutMs);
+  timeout.unref?.();
+
+  try {
+    const raw = await arkFetch("/responses", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: arkTitleModel,
+        input: [{ role: "user", content }],
+      }),
+    });
+    return cleanGeneratedTitle(extractResponseText(raw), fallback);
+  } catch (error) {
+    console.warn("title generation failed", publicError(error));
+    return fallback;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function estimateProgress(task) {
   if (task.status === "succeeded") return 100;
   if (terminalStatuses.has(task.status)) return task.progress || 0;
@@ -133,11 +224,14 @@ function estimateProgress(task) {
 }
 
 function publicTask(task) {
+  const taskMonitorMode = task.monitorMode || monitorMode;
+  const activeWebhookTask = taskMonitorMode === "webhook" && !terminalStatuses.has(task.status);
+
   return {
     id: task.id,
     task_id: task.arkTaskId,
     status: task.status,
-    progress: estimateProgress(task),
+    progress: activeWebhookTask ? null : estimateProgress(task),
     video_url: task.videoUrl || null,
     error: task.error || null,
     title: task.title,
@@ -156,7 +250,7 @@ function publicTask(task) {
     updated_at: task.updatedAt,
     finished_at: task.finishedAt || null,
     last_poll_error: task.lastPollError || null,
-    monitor_mode: task.monitorMode || monitorMode,
+    monitor_mode: taskMonitorMode,
   };
 }
 
@@ -331,7 +425,9 @@ function applyArkResult(task, raw) {
   task.videoUrl = next.videoUrl || task.videoUrl || null;
   task.error = next.error;
   task.updatedAt = Date.now();
-  task.progress = estimateProgress(task);
+  task.progress = task.monitorMode === "webhook" && !terminalStatuses.has(task.status)
+    ? null
+    : estimateProgress(task);
   task.rawMeta = next.rawMeta;
 
   if (terminalStatuses.has(task.status)) {
@@ -401,6 +497,7 @@ function schedulePoll(id, delayMs) {
 
 async function handleGenerate(req, res) {
   const input = normalizeGenerateInput(await readJson(req));
+  input.title = await generateTaskTitle(input);
   const { localTaskId, arkTaskId } = await createArkTask(input);
   const now = Date.now();
   const id = monitorMode === "webhook" ? localTaskId : arkTaskId;
@@ -408,7 +505,7 @@ async function handleGenerate(req, res) {
     id,
     arkTaskId,
     status: "queued",
-    progress: 3,
+    progress: monitorMode === "poll" ? 3 : null,
     title: input.title,
     prompt: input.prompt,
     uiModel: input.uiModel,

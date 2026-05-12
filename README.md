@@ -15,6 +15,7 @@ The React Compiler is not enabled on this template because of its impact on dev 
 
 The server owns Ark task state and persists it under `DATA_DIR`.
 
+- `ARK_TITLE_MODEL=ep-20260512155127-ngn88` calls Ark `/responses` with the same `ARK_API_KEY` to generate concise task titles. If the title call fails or times out, the server falls back to the prompt.
 - `TASK_MONITOR_MODE=poll` keeps polling Ark in the background.
 - `TASK_MONITOR_MODE=webhook` sends `callback_url` on task creation and accepts Ark callbacks at `/api/ark/webhook`.
 - In webhook mode set `PUBLIC_BASE_URL` or `ARK_CALLBACK_BASE_URL` to the public app origin. If `ARK_WEBHOOK_TOKEN` is set, the token is appended to the callback URL and verified on receipt.

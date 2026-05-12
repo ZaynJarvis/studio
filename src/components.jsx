@@ -171,9 +171,6 @@ export function GenerationProgress({ progress, label }) {
       <div style={{ marginTop: 14, height: 1, background: "var(--line)" }}>
         <div style={{ height: 1, background: "var(--accent)", width: progress + "%", transition: "width .3s" }} />
       </div>
-      <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".12em", marginTop: 14, textTransform: "uppercase" }}>
-        TC 00:00:00:00 &rarr; 00:00:{String(Math.floor(progress / 10)).padStart(2, "0")}:00
-      </div>
     </div>
   );
 }

@@ -72,7 +72,7 @@ function videoPatchFromTask(task, current = {}) {
 function taskRuntimeText(v) {
   if (!isActiveTask(v.status)) return `${v.duration}s · ${v.resolution}`;
   if (v.monitorMode === "poll" && Number.isFinite(v.progress)) return `${Math.round(v.progress)}%`;
-  return "preview later";
+  return "rendering";
 }
 
 function taskBadgeText(v) {
@@ -93,7 +93,10 @@ async function fetchJson(path, options) {
   const res = await fetch(path, options);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error?.message || `Request failed with HTTP ${res.status}`);
+    const error = new Error(data.error?.message || `Request failed with HTTP ${res.status}`);
+    error.status = res.status;
+    error.data = data;
+    throw error;
   }
   return data;
 }
@@ -233,7 +236,9 @@ function VideoCard({ v, onClick, onTemplate }) {
       <div className="video-thumb">
         {v.thumb
           ? <img src={v.thumb} alt="" loading="lazy"/>
-          : <div style={{ width: "100%", height: "100%", background: "linear-gradient(135deg,#222,#000)" }}/>}
+          : <div className={"video-thumb-placeholder" + (active ? " active" : "")}>
+              {active && <span className="spinner" />}
+            </div>}
         <div className="play"><div className={"play-ic" + (active ? " play-ic-active" : "")}><Icon name={active ? "refresh" : "play"} size={16}/></div></div>
         <div className="video-badge">{badge}</div>
         <div className="video-runtime">{taskRuntimeText(v)}</div>
@@ -279,11 +284,11 @@ function PendingTaskList({ videos, navigate, onTemplate }) {
 
   return (
     <>
-      <SectionHeader title="Pending Tasks" sub="server ledger · visible after tab close · supports parallel renders" count={activeVideos.length} />
+      <SectionHeader title="Pending Tasks" sub="server-saved renders · safe after refresh" count={activeVideos.length} />
       <div className="queue-note">
         <span className={activeVideos.length ? "spinner" : "queue-dot"} />
         <span>{activeVideos.length
-          ? "Rendering tasks are tracked by the server. Open any card to watch its preview placeholder."
+          ? `${activeVideos.length} active render${activeVideos.length > 1 ? "s" : ""}. Open a card for its persistent preview page.`
           : "No rendering tasks right now. New submissions will appear here while the server waits for results."}</span>
       </div>
       {activeVideos.length > 0 ? (
@@ -317,10 +322,7 @@ export function HomePage() {
 
   return (
     <div>
-      <section style={{
-        position: "relative", padding: "56px 64px 48px",
-        borderBottom: "1px solid var(--line)",
-      }}>
+      <section className="home-hero">
         <div className="mono" style={{ fontSize: 10, letterSpacing: ".24em", color: "var(--accent)", textTransform: "uppercase", marginBottom: 22, display: "flex", alignItems: "center", gap: 10 }}>
           <span>REEL 14/26</span>
           <span style={{ width: 14, height: 1, background: "var(--accent)" }}></span>
@@ -333,7 +335,7 @@ export function HomePage() {
         <p style={{ fontSize: 15, lineHeight: 1.55, color: "var(--fg-2)", maxWidth: 540, margin: "20px 0 28px" }}>
           Start from a reference plate or write the shot fresh. Every previous take is on the wall &mdash; click one to roll a variation.
         </p>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div className="hero-actions">
           <button className="btn btn-primary btn-lg" onClick={() => navigate("/create")}>
             <Icon name="plus" size={14}/> Roll new take
           </button>
@@ -342,11 +344,7 @@ export function HomePage() {
           </button>
         </div>
 
-        <div style={{
-          position: "absolute", right: 64, top: 56,
-          fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)",
-          textAlign: "right", lineHeight: 1.8,
-        }}>
+        <div className="hero-stats">
           <div>BAY · 02</div>
           <div>FPS · 24</div>
           <div>STOCK · {videos.length.toString().padStart(2, "0")} TAKES</div>
@@ -355,15 +353,26 @@ export function HomePage() {
         </div>
       </section>
 
-      <section style={{ padding: "32px 64px 0" }}>
+      <section className="page-section compact">
         <PendingTaskList videos={videos} navigate={navigate} onTemplate={applyTemplate} />
       </section>
 
-      <section style={{ padding: "32px 64px 64px" }}>
+      <section className="page-section">
         <SectionHeader title="Dailies" sub="recent finished takes · click to revisit · grab as template" count={readyVideos.length} />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
-          {readyVideos.map((v) => <VideoCard key={v.id} v={v} onClick={() => navigate("/preview", { id: v.id })} onTemplate={() => applyTemplate(v)} />)}
-        </div>
+        {readyVideos.length > 0 ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
+            {readyVideos.map((v) => <VideoCard key={v.id} v={v} onClick={() => navigate("/preview", { id: v.id })} onTemplate={() => applyTemplate(v)} />)}
+          </div>
+        ) : (
+          <div className="queue-empty">
+            <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", marginBottom: 8 }}>
+              No finished takes
+            </div>
+            <p style={{ margin: 0, color: "var(--fg-2)", lineHeight: 1.55 }}>
+              Completed renders will land here with their first-frame cover as soon as Ark returns the video.
+            </p>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -413,27 +422,13 @@ function DurationSlider({ value, onChange, min, max }) {
   );
 }
 
-function GenerationOverlay({ progress, label }) {
-  return (
-    <div style={{
-      minHeight: "calc(100vh - 80px)",
-      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-      padding: 40, gap: 24,
-    }}>
-      <GenerationProgress progress={progress} label={label}/>
-      <div className="mono muted" style={{ fontSize: 11, letterSpacing: ".15em", textTransform: "uppercase", maxWidth: 420, textAlign: "center", lineHeight: 1.7 }}>
-        The task is saved on the server. You can close this tab and find it later on Home or in Library.
-      </div>
-    </div>
-  );
-}
-
 export function CreatePage() {
   const { state, addImage, addVideo } = useStore();
   const route = useHashRoute();
   const { navigate, query } = route;
 
   const tmpl = useMemo(() => state.videos.find((v) => v.id === query.from), [query.from, state.videos]);
+  const imageFromRoute = useMemo(() => state.images.find((img) => img.id === query.fromImage), [query.fromImage, state.images]);
 
   const [prompt, setPrompt] = useState(tmpl ? tmpl.prompt : "");
   const [model, setModel] = useState(tmpl ? tmpl.model : "seedance-pro");
@@ -442,10 +437,10 @@ export function CreatePage() {
   const [duration, setDuration] = useState(tmpl ? tmpl.duration : 5);
   const [camera, setCamera] = useState(tmpl ? tmpl.camera : "dynamic");
   const [seed, setSeed] = useState(() => (tmpl ? tmpl.seed : Math.floor(Math.random() * 99999)));
-  const [image, setImage] = useState(null);
+  const [image, setImage] = useState(imageFromRoute || null);
   const mode = image ? "i2v" : "t2v";
 
-  const [gen, setGen] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
   const { show, node } = useToast();
 
   const onPickFile = (img) => {
@@ -454,8 +449,9 @@ export function CreatePage() {
   };
 
   const startGen = async () => {
+    if (submitting) return;
     if (!prompt.trim()) { show("Write a prompt to generate"); return; }
-    setGen({ progress: 2, label: "Submitting task" });
+    setSubmitting(true);
 
     try {
       const task = await fetchJson("/api/generate", {
@@ -479,18 +475,15 @@ export function CreatePage() {
         thumb: image?.src,
         imageId: image?.id,
       }));
-      setGen(null);
       navigate("/preview", { id: v.id });
     } catch (error) {
-      setGen(null);
+      setSubmitting(false);
       show(error.message || "Failed to submit task");
     }
   };
 
-  if (gen) return <GenerationOverlay {...gen} />;
-
   return (
-    <div style={{ padding: "32px 64px", maxWidth: 1400, margin: "0 auto" }}>
+    <div className="page-shell">
       {node}
       <header style={{ marginBottom: 28, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16 }}>
         <div>
@@ -511,7 +504,7 @@ export function CreatePage() {
         </button>
       </header>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.2fr .9fr", gap: 28 }}>
+      <div className="create-grid">
         <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
           <div>
             <label className="label">
@@ -619,9 +612,15 @@ export function CreatePage() {
             </div>
           </ParamRow>
 
-          <button className="btn btn-primary btn-lg" onClick={startGen} style={{ marginTop: 4 }}>
-            <Icon name="sparkle" size={14}/> Generate video
+          <button className="btn btn-primary btn-lg" onClick={startGen} disabled={submitting} aria-busy={submitting} style={{ marginTop: 4 }}>
+            <Icon name={submitting ? "refresh" : "sparkle"} size={14} className={submitting ? "spin-ic" : undefined}/>
+            {submitting ? "Submitting task" : "Generate video"}
           </button>
+          <div className="submit-note">
+            {submitting
+              ? "Creating the server task. The preview page will open as soon as the task id is ready."
+              : "Generation runs in the background. Closing the tab will not cancel the render."}
+          </div>
         </aside>
       </div>
     </div>
@@ -650,6 +649,7 @@ function TaskWaitPanel({ v }) {
   const failed = TERMINAL_TASK_STATUSES.has(status) && status !== "succeeded";
   const label = failed ? status : status === "running" ? "Rendering task" : "Queued task";
   const showProgress = v.monitorMode === "poll" && Number.isFinite(v.progress);
+  const shortTaskId = (v.arkTaskId || v.taskId || v.id || "").slice(0, 24);
 
   return (
     <div style={{
@@ -677,14 +677,20 @@ function TaskWaitPanel({ v }) {
               <Icon name="refresh" size={28}/>
             </div>
             <div className="mono" style={{ fontSize: 10, letterSpacing: ".2em", textTransform: "uppercase", color: "var(--accent)", marginBottom: 12 }}>
-              Rendering
+              {status}
             </div>
             <h2 className="display" style={{ color: "#fff", fontSize: 30, margin: "0 0 12px", lineHeight: 1.1 }}>
-              Preview will appear here later.
+              Rendering in the background
             </h2>
             <p style={{ color: "rgba(255,255,255,.72)", maxWidth: 520, lineHeight: 1.55, margin: "0 auto" }}>
-              This task is stored on the server. You can close this tab; reopen Home, Library, or this preview page to see the result after the callback arrives.
+              This preview page is backed by the server task. Keep it open or come back later; the video will replace this state when Ark sends the result.
             </p>
+            <div className="rendering-pills">
+              <span>{v.resolution}</span>
+              <span>{v.aspect}</span>
+              <span>{v.duration}s</span>
+              {shortTaskId && <span>{shortTaskId}</span>}
+            </div>
           </div>
         )}
       </div>
@@ -700,6 +706,7 @@ export function PreviewPage() {
   const taskId = v?.taskId || query.id;
   const shouldPoll = taskId && (!v || v.taskId || isActiveTask(v.status));
   const videoRef = useRef(v);
+  const [taskError, setTaskError] = useState(null);
 
   useEffect(() => {
     videoRef.current = v;
@@ -720,12 +727,17 @@ export function PreviewPage() {
         const patch = videoPatchFromTask(task, currentVideo || { id: task.id });
         if (currentVideo) updateVideo(currentVideo.id, patch);
         else upsertVideo(patch);
+        setTaskError(null);
 
         if (!TERMINAL_TASK_STATUSES.has(task.status)) {
           timer = setTimeout(poll, 2500);
         }
       } catch (error) {
         if (!stopped) {
+          if (error.status === 404) {
+            setTaskError(error.message || "Task not found");
+            return;
+          }
           show(error.message || "Failed to fetch task status");
           timer = setTimeout(poll, 5000);
         }
@@ -741,9 +753,16 @@ export function PreviewPage() {
   }, [shouldPoll, taskId, updateVideo, upsertVideo, show]);
 
   if (!v) return (
-    <div style={{ padding: 64, textAlign: "center" }}>
-      <p className="muted">Loading task...</p>
-      <button className="btn" onClick={() => navigate("/")}>← Back to gallery</button>
+    <div className="page-shell">
+      <div className="queue-empty" style={{ margin: "64px auto", textAlign: "center" }}>
+        <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", marginBottom: 8 }}>
+          {taskError ? "Task unavailable" : "Loading task"}
+        </div>
+        <p style={{ margin: "0 0 14px", color: "var(--fg-2)", lineHeight: 1.55 }}>
+          {taskError || "Fetching the server record for this preview."}
+        </p>
+        <button className="btn" onClick={() => navigate("/")}>← Back to gallery</button>
+      </div>
     </div>
   );
 
@@ -771,22 +790,32 @@ export function PreviewPage() {
   };
   const onTemplate = () => navigate("/create", { from: v.id });
   const ready = Boolean(v.src) && (!v.status || v.status === "succeeded");
+  const onCopyLink = async () => {
+    const link = `${window.location.origin}${window.location.pathname}#/preview?id=${encodeURIComponent(v.id)}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      show("Preview link copied");
+    } catch {
+      show(link);
+    }
+  };
 
   return (
-    <div style={{ padding: "32px 64px", maxWidth: 1400, margin: "0 auto" }}>
+    <div className="page-shell">
       {node}
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
+      <header className="preview-header">
         <button className="btn btn-ghost" onClick={() => navigate("/")}>
           <Icon name="arrowLeft" size={14}/> Back to gallery
         </button>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="preview-actions">
+          <button className="btn" onClick={onCopyLink}><Icon name="copy" size={14}/> Copy link</button>
           <button className="btn" onClick={onTemplate}><Icon name="copy" size={14}/> Use as template</button>
           <button className="btn" onClick={onDownload} disabled={!v.src}><Icon name="download" size={14}/> Download</button>
           <button className="btn" onClick={onDelete} title="Delete"><Icon name="trash" size={14}/></button>
         </div>
       </header>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.6fr .9fr", gap: 28 }}>
+      <div className="preview-grid">
         <div>
           {ready ? <VideoPlayer src={v.src} poster={v.thumb} preload="metadata"/> : <TaskWaitPanel v={v} />}
         </div>
@@ -837,9 +866,22 @@ export function LibraryPage() {
   const { state, removeImage, removeVideo, addImage } = useStore();
   const { navigate } = useHashRoute();
   const [tab, setTab] = useState("images");
+  const [search, setSearch] = useState("");
   const { show, node } = useToast();
   const inputRef = useRef(null);
   const libraryVideos = useMemo(() => [...state.videos].sort(taskSort), [state.videos]);
+  const visibleVideos = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return libraryVideos;
+    return libraryVideos.filter((v) => [
+      v.title,
+      v.prompt,
+      v.status,
+      v.model,
+      v.aspect,
+      v.resolution,
+    ].join(" ").toLowerCase().includes(q));
+  }, [libraryVideos, search]);
   const activeVideos = libraryVideos.filter((v) => isActiveTask(v.status));
 
   const onUpload = (files) => {
@@ -853,7 +895,7 @@ export function LibraryPage() {
   };
 
   return (
-    <div style={{ padding: "32px 64px", maxWidth: 1500, margin: "0 auto" }}>
+    <div className="page-shell wide">
       {node}
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "end", marginBottom: 28, gap: 16 }}>
         <div>
@@ -926,11 +968,20 @@ export function LibraryPage() {
 
       {tab === "videos" && (
         <>
-          <div className="queue-note" style={{ marginBottom: 18 }}>
-            <span className={activeVideos.length ? "spinner" : "queue-dot"} />
-            <span>{activeVideos.length
-              ? `${activeVideos.length} rendering task${activeVideos.length > 1 ? "s" : ""} are tracked by the server and will update here when ready.`
-              : "No pending tasks right now. New renders appear on Home and in this video list."}</span>
+          <div className="library-video-tools">
+            <div className="queue-note" style={{ margin: 0 }}>
+              <span className={activeVideos.length ? "spinner" : "queue-dot"} />
+              <span>{activeVideos.length
+                ? `${activeVideos.length} rendering task${activeVideos.length > 1 ? "s" : ""} will update here when ready.`
+                : "No pending tasks right now. New renders appear on Home and here."}</span>
+            </div>
+            <input
+              className="input"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Filter videos..."
+              style={{ maxWidth: 320 }}
+            />
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18 }}>
           {state.videos.length === 0 && (
@@ -938,7 +989,12 @@ export function LibraryPage() {
               No videos yet. Generate one from Create.
             </div>
           )}
-          {libraryVideos.map((v) => (
+          {state.videos.length > 0 && visibleVideos.length === 0 && (
+            <div className="muted" style={{ gridColumn: "1/-1", padding: 64, textAlign: "center" }}>
+              No videos match that filter.
+            </div>
+          )}
+          {visibleVideos.map((v) => (
             <div key={v.id} style={{ position: "relative" }}>
               <VideoCard v={v}
                 onClick={() => navigate("/preview", { id: v.id })}

@@ -695,6 +695,25 @@ async function handleGetTask(req, res, id) {
   sendJson(res, 200, publicTask(task));
 }
 
+async function handleDeleteTask(req, res, id) {
+  const task = tasks.get(id);
+  if (!task) {
+    sendJson(res, 404, { error: { code: "task_not_found", message: "Task not found." } });
+    return;
+  }
+
+  if (task.artifactPath) {
+    const artifactPath = resolve(publicDataDir, task.artifactPath);
+    if (artifactPath.startsWith(publicDataDir)) {
+      try { rmSync(artifactPath, { force: true }); } catch {}
+    }
+  }
+
+  tasks.delete(id);
+  saveTasks();
+  sendJson(res, 200, { ok: true, deleted: id });
+}
+
 async function handleArkWebhook(req, res, url) {
   if (webhookToken) {
     const provided = url.searchParams.get("token") || req.headers["x-videogen-webhook-token"] || "";
@@ -959,6 +978,11 @@ async function routeApi(req, res, url) {
     const taskMatch = url.pathname.match(/^\/api\/task\/([^/]+)$/);
     if (taskMatch && req.method === "GET") {
       await handleGetTask(req, res, decodeURIComponent(taskMatch[1]));
+      return true;
+    }
+
+    if (taskMatch && req.method === "DELETE") {
+      await handleDeleteTask(req, res, decodeURIComponent(taskMatch[1]));
       return true;
     }
   } catch (error) {

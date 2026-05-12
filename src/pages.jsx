@@ -95,6 +95,19 @@ async function fetchJson(path, options) {
   return data;
 }
 
+async function deleteRemoteTask(v) {
+  const id = v?.taskId || v?.id;
+  if (!id || (!v?.taskId && !v?.arkTaskId)) return;
+
+  try {
+    await fetchJson(`/api/task/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (error) {
+    if (!String(error.message || "").toLowerCase().includes("not found")) {
+      throw error;
+    }
+  }
+}
+
 export function ServerTaskSync() {
   const { state, updateVideo, upsertVideo } = useStore();
   const videosRef = useRef(state.videos);
@@ -746,10 +759,15 @@ export function PreviewPage() {
     a.click();
     show("Download started");
   };
-  const onDelete = () => {
+  const onDelete = async () => {
     if (!confirm("Delete this video permanently?")) return;
-    removeVideo(v.id);
-    navigate("/");
+    try {
+      await deleteRemoteTask(v);
+      removeVideo(v.id);
+      navigate("/");
+    } catch (error) {
+      show(error.message || "Failed to delete task");
+    }
   };
   const onTemplate = () => navigate("/create", { from: v.id });
   const ready = Boolean(v.src) && (!v.status || v.status === "succeeded");
@@ -969,7 +987,17 @@ export function LibraryPage() {
                 onClick={() => navigate("/preview", { id: v.id })}
                 onTemplate={() => navigate("/create", { from: v.id })}/>
               <button className="btn btn-icon"
-                onClick={(e) => { e.stopPropagation(); if (confirm("Delete this video?")) { removeVideo(v.id); show("Video removed"); } }}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (!confirm("Delete this video?")) return;
+                  try {
+                    await deleteRemoteTask(v);
+                    removeVideo(v.id);
+                    show("Video removed");
+                  } catch (error) {
+                    show(error.message || "Failed to delete task");
+                  }
+                }}
                 style={{ position: "absolute", top: 8, right: 8, background: "rgba(0,0,0,.7)", color: "#fff", borderColor: "transparent" }}>
                 <Icon name="trash" size={12}/>
               </button>

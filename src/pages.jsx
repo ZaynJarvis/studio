@@ -101,6 +101,11 @@ async function fetchJson(path, options) {
   return data;
 }
 
+function remoteThumb(value) {
+  const raw = String(value || "");
+  return raw && !raw.startsWith("data:") ? raw : undefined;
+}
+
 async function deleteRemoteTask(v) {
   const id = v?.taskId || v?.id;
   if (!id || (!v?.taskId && !v?.arkTaskId)) return;
@@ -452,16 +457,20 @@ export function CreatePage() {
     if (submitting) return;
     if (!prompt.trim()) { show("Write a prompt to generate"); return; }
     setSubmitting(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
 
     try {
+      const imageSrc = image?.src;
       const task = await fetchJson("/api/generate", {
         method: "POST",
+        signal: controller.signal,
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           prompt,
-          image_url: image?.src,
+          image_url: imageSrc,
           image_id: image?.id,
-          thumb: image?.src,
+          thumb: remoteThumb(imageSrc),
           model,
           resolution,
           aspect,
@@ -478,7 +487,9 @@ export function CreatePage() {
       navigate("/preview", { id: v.id });
     } catch (error) {
       setSubmitting(false);
-      show(error.message || "Failed to submit task");
+      show(error.name === "AbortError" ? "Submit timed out. Try a smaller image or retry." : error.message || "Failed to submit task");
+    } finally {
+      clearTimeout(timeout);
     }
   };
 

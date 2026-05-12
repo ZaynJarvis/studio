@@ -40,6 +40,7 @@ const callbackBaseUrl = (process.env.ARK_CALLBACK_BASE_URL || process.env.PUBLIC
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || process.env.ARK_CALLBACK_BASE_URL || "").replace(/\/+$/, "");
 const webhookToken = process.env.ARK_WEBHOOK_TOKEN || process.env.WEBHOOK_TOKEN || process.env.MCP_TOKEN || "";
 const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
+const maxJsonBodyBytes = Number(process.env.MAX_JSON_BODY_BYTES || Math.ceil(maxImageBytes * 1.5) + 1024 * 1024);
 const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1024);
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]);
@@ -1204,18 +1205,36 @@ async function routeApi(req, res, url) {
   return false;
 }
 
-function readJson(req, maxBytes = 7 * 1024 * 1024) {
+function readJson(req, maxBytes = maxJsonBodyBytes) {
   return new Promise((resolveBody, reject) => {
     let raw = "";
+    let settled = false;
+    const contentLength = Number(req.headers["content-length"] || 0);
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      raw = "";
+      req.resume();
+      reject(error);
+    };
+
+    if (contentLength > maxBytes) {
+      fail(httpError(413, "body_too_large", `Request body is too large. Limit is ${Math.floor(maxBytes / 1024 / 1024)} MB.`));
+      return;
+    }
+
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
+      if (settled) return;
       raw += chunk;
       if (Buffer.byteLength(raw, "utf8") > maxBytes) {
-        reject(httpError(413, "body_too_large", "Request body is too large."));
-        req.destroy();
+        fail(httpError(413, "body_too_large", `Request body is too large. Limit is ${Math.floor(maxBytes / 1024 / 1024)} MB.`));
       }
     });
     req.on("end", () => {
+      if (settled) return;
+      settled = true;
       if (!raw) {
         resolveBody({});
         return;
@@ -1227,7 +1246,11 @@ function readJson(req, maxBytes = 7 * 1024 * 1024) {
         reject(httpError(400, "invalid_json", "Request body must be valid JSON."));
       }
     });
-    req.on("error", reject);
+    req.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
   });
 }
 
@@ -1311,6 +1334,8 @@ createServer(async (req, res) => {
       monitor_mode: monitorMode,
       webhook_ready: monitorMode === "webhook" ? Boolean(callbackBaseUrl) : false,
       data_dir: dataDir,
+      max_json_body_bytes: maxJsonBodyBytes,
+      max_image_bytes: maxImageBytes,
       artifacts: [...tasks.values()].filter((task) => task.artifactUrl).length,
       covers: [...tasks.values()].filter((task) => task.coverUrl).length,
       input_images: [...tasks.values()].filter((task) => task.inputImagePath).length,

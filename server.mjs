@@ -66,6 +66,7 @@ for (const task of tasks.values()) {
     scheduleArtifactCache(task.id, "startup");
   }
 }
+saveTasks();
 
 function loadTasks() {
   try {
@@ -248,6 +249,18 @@ function publicVideoUrl(task) {
   return task.artifactUrl || task.videoUrl || null;
 }
 
+function publicThumbUrl(value) {
+  const raw = String(value || "");
+  if (!raw || raw.startsWith("data:")) return null;
+  if (raw.length > 2048) return null;
+  return raw;
+}
+
+function publicText(value, max = 4000) {
+  const raw = String(value || "");
+  return raw.length > max ? `${raw.slice(0, max)}...` : raw;
+}
+
 function publicTask(task) {
   const taskMonitorMode = task.monitorMode || monitorMode;
   const activeWebhookTask = taskMonitorMode === "webhook" && !terminalStatuses.has(task.status);
@@ -263,8 +276,8 @@ function publicTask(task) {
     artifact_bytes: task.artifactBytes || null,
     artifact_error: task.artifactError || null,
     error: task.error || null,
-    title: task.title,
-    prompt: task.prompt,
+    title: publicText(task.title, 120),
+    prompt: publicText(task.prompt, 4000),
     model: task.uiModel,
     ark_model: task.arkModel,
     mode: task.mode,
@@ -274,7 +287,7 @@ function publicTask(task) {
     camera: task.camera,
     seed: task.seed,
     image_id: task.imageId || null,
-    thumb: task.thumb || null,
+    thumb: publicThumbUrl(task.thumb),
     created_at: task.createdAt,
     updated_at: task.updatedAt,
     finished_at: task.finishedAt || null,

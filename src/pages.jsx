@@ -39,6 +39,7 @@ function videoPatchFromTask(task, current = {}) {
   const status = task.status || current.status || "queued";
   const monitorMode = task.monitor_mode || current.monitorMode || "poll";
   const progress = task.progress ?? (monitorMode === "webhook" && isActiveTask(status) ? null : current.progress ?? 0);
+  const remoteThumb = task.thumb && !String(task.thumb).startsWith("data:") ? task.thumb : "";
 
   return {
     id: current.id || task.id,
@@ -50,7 +51,7 @@ function videoPatchFromTask(task, current = {}) {
     title: task.title || current.title || "Untitled take",
     prompt: task.prompt || current.prompt || "",
     src: task.video_url || current.src || "",
-    thumb: current.thumb || task.thumb || "",
+    thumb: remoteThumb || "",
     duration: task.duration || current.duration || 5,
     resolution: task.resolution || current.resolution || "1080p",
     aspect: task.aspect || current.aspect || "16:9",

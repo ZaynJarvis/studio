@@ -79,7 +79,7 @@ export function DropZone({ onFile, image, onClear, hint = "Drop image, or click 
   );
 }
 
-export function VideoPlayer({ src, poster, autoplay = false }) {
+export function VideoPlayer({ src, poster, autoplay = false, preload = "metadata" }) {
   const ref = useRef(null);
   const [playing, setPlaying] = useState(autoplay);
   const [t, setT] = useState(0);
@@ -117,7 +117,7 @@ export function VideoPlayer({ src, poster, autoplay = false }) {
     }}>
       <video
         ref={ref} src={src} poster={poster}
-        autoPlay={autoplay} playsInline
+        autoPlay={autoplay} preload={preload} playsInline
         onClick={toggle}
         style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", cursor: "pointer" }}
       />

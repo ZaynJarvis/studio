@@ -789,7 +789,7 @@ export function PreviewPage() {
 
       <div style={{ display: "grid", gridTemplateColumns: "1.6fr .9fr", gap: 28 }}>
         <div>
-          {ready ? <VideoPlayer src={v.src} poster={v.thumb} autoplay/> : <TaskWaitPanel v={v} />}
+          {ready ? <VideoPlayer src={v.src} poster={v.thumb} preload="metadata"/> : <TaskWaitPanel v={v} />}
         </div>
 
         <aside style={{ display: "flex", flexDirection: "column", gap: 16 }}>

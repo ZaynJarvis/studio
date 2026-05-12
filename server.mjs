@@ -1,9 +1,11 @@
 import {
   createReadStream,
+  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -11,12 +13,17 @@ import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const appDir = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const root = resolve(appDir, "dist");
 const port = Number(process.env.PORT || 3000);
 const dataDir = resolve(process.env.DATA_DIR || join(appDir, ".data"));
+const publicDataDir = join(dataDir, "public");
+const artifactsDir = join(publicDataDir, "artifacts");
 const tasksFile = join(dataDir, "tasks.json");
+const publicTasksFile = join(publicDataDir, "tasks.json");
 const arkApiKey = process.env.ARK_API_KEY || "";
 const arkBaseUrl = (process.env.ARK_API_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3").replace(/\/+$/, "");
 const arkParamStyle = process.env.ARK_PARAM_STYLE || "inline";
@@ -26,21 +33,27 @@ const monitorMode = process.env.TASK_MONITOR_MODE === "webhook" ? "webhook" : "p
 const callbackBaseUrl = (process.env.ARK_CALLBACK_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const webhookToken = process.env.ARK_WEBHOOK_TOKEN || process.env.WEBHOOK_TOKEN || process.env.MCP_TOKEN || "";
 const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 5 * 1024 * 1024);
+const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1024);
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]);
 const pollTimers = new Map();
 const pollInflight = new Set();
+const artifactInflight = new Set();
 
 mkdirSync(dataDir, { recursive: true });
+mkdirSync(artifactsDir, { recursive: true });
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".mov": "video/quicktime",
+  ".mp4": "video/mp4",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
   ".webmanifest": "application/manifest+json",
+  ".webm": "video/webm",
 };
 
 let tasks = loadTasks();
@@ -48,6 +61,9 @@ let tasks = loadTasks();
 for (const task of tasks.values()) {
   if (monitorMode === "poll" && !terminalStatuses.has(task.status)) {
     schedulePoll(task.id, 1500);
+  }
+  if (task.status === "succeeded" && (task.sourceVideoUrl || task.videoUrl) && !task.artifactUrl) {
+    scheduleArtifactCache(task.id, "startup");
   }
 }
 
@@ -71,6 +87,17 @@ function saveTasks() {
   const tmp = `${tasksFile}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(tmp, JSON.stringify(payload, null, 2));
   renameSync(tmp, tasksFile);
+
+  const publicPayload = {
+    version: 1,
+    updated_at: Date.now(),
+    tasks: [...tasks.values()]
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+      .map(publicTask),
+  };
+  const publicTmp = `${publicTasksFile}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(publicTmp, JSON.stringify(publicPayload, null, 2));
+  renameSync(publicTmp, publicTasksFile);
 }
 
 function clampInt(value, min, max, fallback) {
@@ -223,6 +250,10 @@ function estimateProgress(task) {
   return Math.max(30, estimate);
 }
 
+function publicVideoUrl(task) {
+  return task.artifactUrl || task.videoUrl || null;
+}
+
 function publicTask(task) {
   const taskMonitorMode = task.monitorMode || monitorMode;
   const activeWebhookTask = taskMonitorMode === "webhook" && !terminalStatuses.has(task.status);
@@ -232,7 +263,11 @@ function publicTask(task) {
     task_id: task.arkTaskId,
     status: task.status,
     progress: activeWebhookTask ? null : estimateProgress(task),
-    video_url: task.videoUrl || null,
+    video_url: publicVideoUrl(task),
+    artifact_url: task.artifactUrl || null,
+    artifact_status: task.artifactStatus || (task.artifactUrl ? "ready" : null),
+    artifact_bytes: task.artifactBytes || null,
+    artifact_error: task.artifactError || null,
     error: task.error || null,
     title: task.title,
     prompt: task.prompt,
@@ -252,6 +287,108 @@ function publicTask(task) {
     last_poll_error: task.lastPollError || null,
     monitor_mode: taskMonitorMode,
   };
+}
+
+function sanitizeFilePart(value) {
+  return String(value || "")
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120) || randomUUID();
+}
+
+function artifactExtension(sourceUrl, contentType) {
+  try {
+    const ext = extname(new URL(sourceUrl).pathname).toLowerCase();
+    if ([".mp4", ".webm", ".mov"].includes(ext)) return ext;
+  } catch {
+    // Fall back to content-type below.
+  }
+
+  if (String(contentType || "").includes("webm")) return ".webm";
+  if (String(contentType || "").includes("quicktime")) return ".mov";
+  return ".mp4";
+}
+
+function scheduleArtifactCache(id, reason = "task") {
+  const task = tasks.get(id);
+  if (!task || task.status !== "succeeded" || task.artifactUrl || artifactInflight.has(id)) return;
+  if (!(task.sourceVideoUrl || task.videoUrl)) return;
+
+  setTimeout(() => {
+    cacheTaskArtifact(id, reason).catch((error) => {
+      console.error(`artifact cache failed ${id}`, publicError(error));
+    });
+  }, 0).unref?.();
+}
+
+async function cacheTaskArtifact(id, reason = "task") {
+  const task = tasks.get(id);
+  if (!task || task.status !== "succeeded" || task.artifactUrl || artifactInflight.has(id)) return;
+
+  const sourceUrl = task.sourceVideoUrl || task.videoUrl;
+  if (!sourceUrl || sourceUrl.startsWith("/media/")) return;
+
+  artifactInflight.add(id);
+  let tmpPath = null;
+
+  try {
+    task.artifactStatus = "caching";
+    task.artifactError = null;
+    task.updatedAt = Date.now();
+    saveTasks();
+
+    const res = await fetch(sourceUrl);
+    if (!res.ok || !res.body) {
+      throw httpError(res.status || 502, "artifact_fetch_failed", `Could not fetch generated video for storage.`);
+    }
+
+    const contentLength = Number(res.headers.get("content-length") || 0);
+    if (contentLength > maxArtifactBytes) {
+      throw httpError(413, "artifact_too_large", "Generated video is larger than MAX_ARTIFACT_BYTES.");
+    }
+
+    const ext = artifactExtension(sourceUrl, res.headers.get("content-type"));
+    const filename = `${sanitizeFilePart(task.id)}${ext}`;
+    const finalPath = join(artifactsDir, filename);
+    tmpPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
+    let bytes = 0;
+
+    const counter = new Transform({
+      transform(chunk, encoding, callback) {
+        bytes += chunk.length;
+        if (bytes > maxArtifactBytes) {
+          callback(httpError(413, "artifact_too_large", "Generated video is larger than MAX_ARTIFACT_BYTES."));
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+
+    await pipeline(Readable.fromWeb(res.body), counter, createWriteStream(tmpPath));
+    renameSync(tmpPath, finalPath);
+    tmpPath = null;
+
+    task.sourceVideoUrl = sourceUrl;
+    task.artifactUrl = `/media/artifacts/${filename}`;
+    task.artifactPath = `artifacts/${filename}`;
+    task.artifactBytes = bytes;
+    task.artifactCachedAt = Date.now();
+    task.artifactStatus = "ready";
+    task.updatedAt = Date.now();
+    saveTasks();
+    console.log(`artifact cache ${reason}: ${id} -> ${task.artifactUrl} (${bytes} bytes)`);
+  } catch (error) {
+    if (tmpPath) {
+      try { rmSync(tmpPath, { force: true }); } catch {}
+    }
+    task.artifactStatus = "failed";
+    task.artifactError = publicError(error);
+    task.updatedAt = Date.now();
+    saveTasks();
+    throw error;
+  } finally {
+    artifactInflight.delete(id);
+  }
 }
 
 function normalizeGenerateInput(input) {
@@ -422,7 +559,10 @@ function normalizeArkResult(raw) {
 function applyArkResult(task, raw) {
   const next = normalizeArkResult(raw);
   task.status = next.status;
-  task.videoUrl = next.videoUrl || task.videoUrl || null;
+  if (next.videoUrl) {
+    task.sourceVideoUrl = next.videoUrl;
+  }
+  task.videoUrl = task.artifactUrl || next.videoUrl || task.videoUrl || null;
   task.error = next.error;
   task.updatedAt = Date.now();
   task.progress = task.monitorMode === "webhook" && !terminalStatuses.has(task.status)
@@ -452,6 +592,9 @@ async function pollTask(id, reason = "timer") {
     task.pollCount = (task.pollCount || 0) + 1;
 
     saveTasks();
+    if (task.status === "succeeded") {
+      scheduleArtifactCache(id, reason);
+    }
     if (!terminalStatuses.has(task.status)) {
       schedulePoll(id, pollDelay(task));
     }
@@ -519,6 +662,10 @@ async function handleGenerate(req, res) {
     imageId: input.imageId,
     thumb: input.thumb,
     videoUrl: null,
+    sourceVideoUrl: null,
+    artifactUrl: null,
+    artifactPath: null,
+    artifactStatus: null,
     error: null,
     createdAt: now,
     updatedAt: now,
@@ -577,6 +724,9 @@ async function handleArkWebhook(req, res, url) {
   task.lastPollError = null;
   tasks.set(task.id, task);
   saveTasks();
+  if (task.status === "succeeded") {
+    scheduleArtifactCache(task.id, "webhook");
+  }
   sendJson(res, 200, { ok: true, task: publicTask(task) });
 }
 
@@ -684,6 +834,37 @@ function resolveAsset(urlPath) {
   return join(root, "index.html");
 }
 
+function resolveDataAsset(urlPath) {
+  const withoutPrefix = urlPath.replace(/^\/media\/?/, "");
+  const cleanPath = normalize(decodeURIComponent(withoutPrefix.split("?")[0])).replace(/^(\.\.[/\\])+/, "");
+  const candidate = resolve(publicDataDir, `./${cleanPath}`);
+
+  if (!candidate.startsWith(publicDataDir)) {
+    return null;
+  }
+
+  if (existsSync(candidate) && statSync(candidate).isFile()) {
+    return candidate;
+  }
+
+  return null;
+}
+
+function sendFile(req, res, filePath, cacheControl) {
+  const ext = extname(filePath);
+  res.writeHead(200, {
+    "content-type": contentTypes[ext] || "application/octet-stream",
+    "cache-control": cacheControl,
+  });
+
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+
+  createReadStream(filePath).pipe(res);
+}
+
 createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
@@ -694,7 +875,28 @@ createServer(async (req, res) => {
       tasks: tasks.size,
       monitor_mode: monitorMode,
       webhook_ready: monitorMode === "webhook" ? Boolean(callbackBaseUrl) : false,
+      data_dir: dataDir,
+      artifacts: [...tasks.values()].filter((task) => task.artifactUrl).length,
     });
+    return;
+  }
+
+  if (url.pathname === "/state/tasks.json") {
+    if (!existsSync(publicTasksFile)) {
+      saveTasks();
+    }
+    sendFile(req, res, publicTasksFile, "no-store");
+    return;
+  }
+
+  if (url.pathname.startsWith("/media/")) {
+    const dataFile = resolveDataAsset(url.pathname);
+    if (!dataFile) {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Not found");
+      return;
+    }
+    sendFile(req, res, dataFile, "public, max-age=31536000, immutable");
     return;
   }
 
@@ -711,19 +913,10 @@ createServer(async (req, res) => {
   }
 
   const ext = extname(filePath);
-  res.writeHead(200, {
-    "content-type": contentTypes[ext] || "application/octet-stream",
-    "cache-control": ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable",
-  });
-
-  if (req.method === "HEAD") {
-    res.end();
-    return;
-  }
-
-  createReadStream(filePath).pipe(res);
+  sendFile(req, res, filePath, ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable");
 }).listen(port, "0.0.0.0", () => {
   console.log(`videogen listening on :${port}`);
   console.log(`task store: ${tasksFile}`);
+  console.log(`artifact store: ${artifactsDir}`);
   console.log(`task monitor mode: ${monitorMode}`);
 });

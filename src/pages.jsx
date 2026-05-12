@@ -10,7 +10,6 @@ const HOST_PARAMS = {
   cameras: ["fixed", "dynamic"],
   models: [
     { id: "seedance-pro", label: "2.0 Pro", note: "highest quality · up to 2K · multi-shot" },
-    { id: "seedance-lite", label: "2.0 Lite", note: "fast · 1080p · single shot" },
   ],
 };
 
@@ -529,7 +528,7 @@ export function CreatePage() {
           </div>
 
           <ParamRow label="Model">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
               {HOST_PARAMS.models.map((m) => (
                 <button key={m.id}
                   className={"surface"}

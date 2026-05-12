@@ -121,13 +121,7 @@ function normalizeStatus(status) {
   return raw;
 }
 
-function resolveModel(uiModel, mode) {
-  if (uiModel && !uiModel.startsWith("seedance-")) return uiModel;
-  if (uiModel === "seedance-lite") {
-    return mode === "i2v"
-      ? process.env.ARK_MODEL_LITE_I2V || "doubao-seedance-1-0-lite-i2v-250428"
-      : process.env.ARK_MODEL_LITE_T2V || "doubao-seedance-1-0-lite-t2v-250428";
-  }
+function resolveModel() {
   return process.env.ARK_MODEL_PRO || "doubao-seedance-2-0-260128";
 }
 
@@ -408,8 +402,8 @@ function normalizeGenerateInput(input) {
   const resolution = normalizeResolution(input.resolution || "1080p");
   const aspect = String(input.aspect_ratio || input.aspect || "16:9");
   const camera = input.camera_fixed === true || input.camera === "fixed" ? "fixed" : "dynamic";
-  const uiModel = String(input.model || "seedance-pro");
-  const arkModel = resolveModel(uiModel, mode);
+  const uiModel = "seedance-pro";
+  const arkModel = resolveModel();
 
   return {
     prompt,

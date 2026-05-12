@@ -18,6 +18,7 @@ The server owns Ark task state and persists it under `DATA_DIR`.
 - `DATA_DIR/tasks.json` stores the durable queue/success task ledger.
 - `DATA_DIR/public/tasks.json` is a sanitized static snapshot of the same ledger, served at `/state/tasks.json`.
 - `DATA_DIR/public/artifacts/` stores downloaded successful videos, served at `/media/artifacts/...`.
+- `DATA_DIR/public/covers/` stores first-frame JPG covers extracted from cached videos, served at `/media/covers/...`.
 - `MAX_ARTIFACT_BYTES=524288000` caps the video artifact cache size.
 - `ARK_TITLE_MODEL=ep-20260512155127-ngn88` calls Ark `/responses` with the same `ARK_API_KEY` to generate concise task titles. If the title call fails or times out, the server falls back to the prompt.
 - `TASK_MONITOR_MODE=poll` keeps polling Ark in the background.

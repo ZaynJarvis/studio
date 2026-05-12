@@ -9,12 +9,16 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const appDir = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const root = resolve(appDir, "dist");
@@ -22,6 +26,7 @@ const port = Number(process.env.PORT || 3000);
 const dataDir = resolve(process.env.DATA_DIR || join(appDir, ".data"));
 const publicDataDir = join(dataDir, "public");
 const artifactsDir = join(publicDataDir, "artifacts");
+const coversDir = join(publicDataDir, "covers");
 const tasksFile = join(dataDir, "tasks.json");
 const publicTasksFile = join(publicDataDir, "tasks.json");
 const arkApiKey = process.env.ARK_API_KEY || "";
@@ -39,13 +44,17 @@ const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]
 const pollTimers = new Map();
 const pollInflight = new Set();
 const artifactInflight = new Set();
+const coverInflight = new Set();
 
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(artifactsDir, { recursive: true });
+mkdirSync(coversDir, { recursive: true });
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".mov": "video/quicktime",
@@ -64,6 +73,9 @@ for (const task of tasks.values()) {
   }
   if (task.status === "succeeded" && (task.sourceVideoUrl || task.videoUrl) && !task.artifactUrl) {
     scheduleArtifactCache(task.id, "startup");
+  }
+  if (task.status === "succeeded" && task.artifactPath && !task.coverUrl) {
+    scheduleCoverGeneration(task.id, "startup");
   }
 }
 saveTasks();
@@ -140,24 +152,36 @@ function callbackUrlForTask(id) {
   return url.toString();
 }
 
+function limitTitle(title, fallback = "Untitled take") {
+  let clean = String(title || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+
+  clean = clean
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/^[#*\-\s]+/, "")
+    .replace(/^(title|标题)\s*[:：]\s*/i, "")
+    .replace(/[.。!！?？:：;；]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!clean) return fallback;
+
+  if (/[\u3400-\u9fff]/.test(clean)) {
+    return clean.replace(/\s+/g, "").slice(0, 10) || fallback;
+  }
+
+  const words = clean.split(" ").filter(Boolean).slice(0, 5).join(" ");
+  return words.slice(0, 60).trim() || fallback;
+}
+
 function titleFromPrompt(prompt) {
-  return (prompt.split(/[.,;\n，。；]/)[0] || "Untitled take").trim().slice(0, 80);
+  return limitTitle((prompt.split(/[.,;\n，。；]/)[0] || "Untitled take").trim());
 }
 
 function cleanGeneratedTitle(text, fallback) {
-  const title = String(text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
-
-  if (!title) return fallback;
-
-  return title
-    .replace(/^["'`]+|["'`]+$/g, "")
-    .replace(/^[#*\-\s]+/, "")
-    .replace(/[.。!！?？:：;；]+$/g, "")
-    .trim()
-    .slice(0, 80) || fallback;
+  return limitTitle(text, limitTitle(fallback));
 }
 
 function extractResponseText(raw) {
@@ -205,8 +229,9 @@ async function generateTaskTitle(input) {
   content.push({
     type: "input_text",
     text: [
-      "Create a concise title for a video generation task.",
-      "Return only the title, in English, 3 to 8 words, no quotes.",
+      "Create a short production title for a video generation task.",
+      "Return only the title, no quotes, no prefix, and do not copy the full prompt.",
+      "If the prompt is Chinese, use Chinese and keep it 4 to 10 characters. Otherwise use English and keep it 2 to 5 words.",
       `Video prompt: ${input.prompt}`,
     ].join("\n"),
   });
@@ -275,6 +300,10 @@ function publicTask(task) {
     artifact_status: task.artifactStatus || (task.artifactUrl ? "ready" : null),
     artifact_bytes: task.artifactBytes || null,
     artifact_error: task.artifactError || null,
+    cover_url: task.coverUrl || null,
+    cover_status: task.coverStatus || (task.coverUrl ? "ready" : null),
+    cover_bytes: task.coverBytes || null,
+    cover_error: task.coverError || null,
     error: task.error || null,
     title: publicText(task.title, 120),
     prompt: publicText(task.prompt, 4000),
@@ -287,7 +316,7 @@ function publicTask(task) {
     camera: task.camera,
     seed: task.seed,
     image_id: task.imageId || null,
-    thumb: publicThumbUrl(task.thumb),
+    thumb: publicThumbUrl(task.coverUrl || task.thumb),
     created_at: task.createdAt,
     updated_at: task.updatedAt,
     finished_at: task.finishedAt || null,
@@ -324,6 +353,18 @@ function scheduleArtifactCache(id, reason = "task") {
   setTimeout(() => {
     cacheTaskArtifact(id, reason).catch((error) => {
       console.error(`artifact cache failed ${id}`, publicError(error));
+    });
+  }, 0).unref?.();
+}
+
+function scheduleCoverGeneration(id, reason = "task") {
+  const task = tasks.get(id);
+  if (!task || task.status !== "succeeded" || task.coverUrl || coverInflight.has(id)) return;
+  if (!task.artifactPath) return;
+
+  setTimeout(() => {
+    generateTaskCover(id, reason).catch((error) => {
+      console.error(`cover generation failed ${id}`, publicError(error));
     });
   }, 0).unref?.();
 }
@@ -384,6 +425,7 @@ async function cacheTaskArtifact(id, reason = "task") {
     task.updatedAt = Date.now();
     saveTasks();
     console.log(`artifact cache ${reason}: ${id} -> ${task.artifactUrl} (${bytes} bytes)`);
+    scheduleCoverGeneration(id, reason);
   } catch (error) {
     if (tmpPath) {
       try { rmSync(tmpPath, { force: true }); } catch {}
@@ -395,6 +437,76 @@ async function cacheTaskArtifact(id, reason = "task") {
     throw error;
   } finally {
     artifactInflight.delete(id);
+  }
+}
+
+async function generateTaskCover(id, reason = "task") {
+  const task = tasks.get(id);
+  if (!task || task.status !== "succeeded" || task.coverUrl || coverInflight.has(id)) return;
+
+  const artifactPath = task.artifactPath ? resolve(publicDataDir, task.artifactPath) : null;
+  if (!artifactPath || !artifactPath.startsWith(publicDataDir) || !existsSync(artifactPath)) return;
+
+  coverInflight.add(id);
+  let tmpPath = null;
+
+  try {
+    const filename = `${sanitizeFilePart(task.id)}.jpg`;
+    const finalPath = join(coversDir, filename);
+    const coverUrl = `/media/covers/${filename}`;
+
+    task.coverStatus = "generating";
+    task.coverError = null;
+    task.updatedAt = Date.now();
+    saveTasks();
+
+    if (!existsSync(finalPath)) {
+      tmpPath = join(coversDir, `${sanitizeFilePart(task.id)}.${process.pid}.${Date.now()}.jpg`);
+      await execFileAsync("ffmpeg", [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        "0",
+        "-i",
+        artifactPath,
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=1280:-2:force_original_aspect_ratio=decrease",
+        "-q:v",
+        "3",
+        "-f",
+        "image2",
+        tmpPath,
+      ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
+      renameSync(tmpPath, finalPath);
+      tmpPath = null;
+    }
+
+    const bytes = statSync(finalPath).size;
+    task.coverUrl = coverUrl;
+    task.coverPath = `covers/${filename}`;
+    task.coverBytes = bytes;
+    task.coverGeneratedAt = Date.now();
+    task.coverStatus = "ready";
+    task.coverError = null;
+    task.thumb = coverUrl;
+    task.updatedAt = Date.now();
+    saveTasks();
+    console.log(`cover generation ${reason}: ${id} -> ${task.coverUrl} (${bytes} bytes)`);
+  } catch (error) {
+    if (tmpPath) {
+      try { rmSync(tmpPath, { force: true }); } catch {}
+    }
+    task.coverStatus = "failed";
+    task.coverError = publicError(error);
+    task.updatedAt = Date.now();
+    saveTasks();
+    throw error;
+  } finally {
+    coverInflight.delete(id);
   }
 }
 
@@ -719,6 +831,12 @@ async function handleDeleteTask(req, res, id) {
     const artifactPath = resolve(publicDataDir, task.artifactPath);
     if (artifactPath.startsWith(publicDataDir)) {
       try { rmSync(artifactPath, { force: true }); } catch {}
+    }
+  }
+  if (task.coverPath) {
+    const coverPath = resolve(publicDataDir, task.coverPath);
+    if (coverPath.startsWith(publicDataDir)) {
+      try { rmSync(coverPath, { force: true }); } catch {}
     }
   }
 
@@ -1115,6 +1233,7 @@ createServer(async (req, res) => {
       webhook_ready: monitorMode === "webhook" ? Boolean(callbackBaseUrl) : false,
       data_dir: dataDir,
       artifacts: [...tasks.values()].filter((task) => task.artifactUrl).length,
+      covers: [...tasks.values()].filter((task) => task.coverUrl).length,
     });
     return;
   }

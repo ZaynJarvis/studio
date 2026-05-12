@@ -39,7 +39,7 @@ function videoPatchFromTask(task, current = {}) {
   const status = task.status || current.status || "queued";
   const monitorMode = task.monitor_mode || current.monitorMode || "poll";
   const progress = task.progress ?? (monitorMode === "webhook" && isActiveTask(status) ? null : current.progress ?? 0);
-  const remoteThumb = task.thumb && !String(task.thumb).startsWith("data:") ? task.thumb : "";
+  const remoteThumb = task.cover_url || (task.thumb && !String(task.thumb).startsWith("data:") ? task.thumb : "");
 
   return {
     id: current.id || task.id,
@@ -48,6 +48,8 @@ function videoPatchFromTask(task, current = {}) {
     status,
     progress,
     monitorMode,
+    coverUrl: task.cover_url || current.coverUrl || null,
+    coverStatus: task.cover_status || current.coverStatus || null,
     title: task.title || current.title || "Untitled take",
     prompt: task.prompt || current.prompt || "",
     src: task.video_url || current.src || "",
@@ -171,13 +173,10 @@ export function ServerTaskSync() {
 }
 
 export function Nav({ route, navigate }) {
-  const { state } = useStore();
-  const activeCount = state.videos.filter((v) => isActiveTask(v.status)).length;
   const items = [
     { path: "/", icon: "home", label: "Home", kbd: "1" },
     { path: "/create", icon: "sparkle", label: "Create", kbd: "2" },
     { path: "/library", icon: "grid", label: "Library", kbd: "3" },
-    { path: "/queue", icon: "refresh", label: "Queue", kbd: activeCount ? String(activeCount) : "4" },
   ];
 
   return (
@@ -259,7 +258,7 @@ function VideoCard({ v, onClick, onTemplate }) {
   );
 }
 
-function QueueEmptyState({ onCreate }) {
+function PendingEmptyState({ onCreate }) {
   return (
     <div className="queue-empty">
       <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", marginBottom: 8 }}>
@@ -285,7 +284,7 @@ function PendingTaskList({ videos, navigate, onTemplate }) {
         <span className={activeVideos.length ? "spinner" : "queue-dot"} />
         <span>{activeVideos.length
           ? "Rendering tasks are tracked by the server. Open any card to watch its preview placeholder."
-          : "This queue is empty now. It will stay visible so you always know where in-flight renders go."}</span>
+          : "No rendering tasks right now. New submissions will appear here while the server waits for results."}</span>
       </div>
       {activeVideos.length > 0 ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
@@ -299,7 +298,7 @@ function PendingTaskList({ videos, navigate, onTemplate }) {
           ))}
         </div>
       ) : (
-        <QueueEmptyState onCreate={() => navigate("/create")} />
+        <PendingEmptyState onCreate={() => navigate("/create")} />
       )}
     </>
   );
@@ -351,7 +350,7 @@ export function HomePage() {
           <div>BAY · 02</div>
           <div>FPS · 24</div>
           <div>STOCK · {videos.length.toString().padStart(2, "0")} TAKES</div>
-          <div>QUEUE · {activeVideos.length.toString().padStart(2, "0")} TASKS</div>
+          <div>TASKS · {activeVideos.length.toString().padStart(2, "0")} ACTIVE</div>
           <div style={{ color: activeVideos.length ? "var(--accent)" : "var(--accent-2)" }}>● {activeVideos.length ? "RENDERING" : "REC READY"}</div>
         </div>
       </section>
@@ -423,7 +422,7 @@ function GenerationOverlay({ progress, label }) {
     }}>
       <GenerationProgress progress={progress} label={label}/>
       <div className="mono muted" style={{ fontSize: 11, letterSpacing: ".15em", textTransform: "uppercase", maxWidth: 420, textAlign: "center", lineHeight: 1.7 }}>
-        The task is saved on the server. You can close this tab and find it later in the Rendering Queue or Library.
+        The task is saved on the server. You can close this tab and find it later on Home or in Library.
       </div>
     </div>
   );
@@ -834,49 +833,6 @@ export function PreviewPage() {
   );
 }
 
-export function QueuePage() {
-  const { state } = useStore();
-  const { navigate } = useHashRoute();
-  const videos = useMemo(() => [...state.videos].sort(taskSort), [state.videos]);
-  const activeVideos = videos.filter((v) => isActiveTask(v.status));
-  const completed = videos.filter((v) => !isActiveTask(v.status)).slice(0, 8);
-  const applyTemplate = (v) => navigate("/create", { from: v.id });
-
-  return (
-    <div style={{ padding: "32px 64px", maxWidth: 1500, margin: "0 auto" }}>
-      <header style={{ marginBottom: 28, display: "flex", alignItems: "end", justifyContent: "space-between", gap: 16 }}>
-        <div>
-          <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 6 }}>
-            Server task ledger
-          </div>
-          <h1 className="display" style={{ fontSize: 40, margin: 0 }}>
-            Queue
-          </h1>
-        </div>
-        <button className="btn btn-primary" onClick={() => navigate("/create")}>
-          <Icon name="plus" size={14}/> New render
-        </button>
-      </header>
-
-      <PendingTaskList videos={videos} navigate={navigate} onTemplate={applyTemplate} />
-
-      <section style={{ marginTop: 42 }}>
-        <SectionHeader title="Recent Previews" sub="completed tasks from the same server ledger" count={completed.length} />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18 }}>
-          {completed.map((v) => (
-            <VideoCard
-              key={v.id}
-              v={v}
-              onClick={() => navigate("/preview", { id: v.id })}
-              onTemplate={() => applyTemplate(v)}
-            />
-          ))}
-        </div>
-      </section>
-    </div>
-  );
-}
-
 export function LibraryPage() {
   const { state, removeImage, removeVideo, addImage } = useStore();
   const { navigate } = useHashRoute();
@@ -974,7 +930,7 @@ export function LibraryPage() {
             <span className={activeVideos.length ? "spinner" : "queue-dot"} />
             <span>{activeVideos.length
               ? `${activeVideos.length} rendering task${activeVideos.length > 1 ? "s" : ""} are tracked by the server and will update here when ready.`
-              : "No pending tasks right now. The Queue page remains available from the sidebar."}</span>
+              : "No pending tasks right now. New renders appear on Home and in this video list."}</span>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18 }}>
           {state.videos.length === 0 && (

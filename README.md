@@ -25,6 +25,17 @@ The server owns Ark task state and persists it under `DATA_DIR`.
 - `TASK_MONITOR_MODE=webhook` sends `callback_url` on task creation and accepts Ark callbacks at `/api/ark/webhook`.
 - In webhook mode set `PUBLIC_BASE_URL` or `ARK_CALLBACK_BASE_URL` to the public app origin. If `ARK_WEBHOOK_TOKEN` is set, the token is appended to the callback URL and verified on receipt.
 
+## AIGC storyboard workflow
+
+For character-consistent video production, follow the `agentara/skills` AIGC chain:
+
+1. Use `video-plan` to define timed scenes.
+2. Use `video-character-design` to create reusable character specs/sheets.
+3. Use `video-storyboard` to generate `storyboard/scene-XX.png` with imagegen with thinking, passing character sheets as visual references only.
+4. Use Studio/`create_video_task` for video generation. Pass only the actual scene/storyboard frame as `image_url`; never pass a character sheet, info graph, turnaround, or reference board as `image_url`.
+
+The video prompt should describe the real scene motion and camera behavior. It must not say that the character sheet/info graph/reference board is the opening frame or first frame.
+
 ## Expanding the ESLint configuration
 
 If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.

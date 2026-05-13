@@ -41,7 +41,7 @@ function videoPatchFromTask(task, current = {}) {
   const monitorMode = task.monitor_mode || current.monitorMode || "poll";
   const progress = task.progress ?? (monitorMode === "webhook" && isActiveTask(status) ? null : current.progress ?? 0);
   const remoteThumb = task.cover_url || (task.thumb && !String(task.thumb).startsWith("data:") ? task.thumb : "");
-  const referenceImageUrl = task.reference_image_url || current.referenceImageUrl || null;
+  const referenceImageUrl = task.source_frame_url || task.reference_image_url || current.referenceImageUrl || null;
 
   return {
     id: current.id || task.id,
@@ -427,7 +427,7 @@ export function HomePage() {
           <em style={{ color: "var(--fg-2)" }}>your next shot.</em>
         </h1>
         <p style={{ fontSize: 15, lineHeight: 1.55, color: "var(--fg-2)", maxWidth: 540, margin: "20px 0 28px" }}>
-          Start from a reference plate or write the shot fresh. Every previous take is on the wall &mdash; click one to roll a variation.
+          Start from a scene frame or write the shot fresh. Every previous take is on the wall &mdash; click one to roll a variation.
         </p>
         <div className="hero-actions">
           <button className="btn btn-primary btn-lg" onClick={() => navigate("/create")}>
@@ -558,6 +558,7 @@ export function CreatePage() {
         body: JSON.stringify({
           prompt,
           image_url: imageSrc,
+          image_role: imageSrc ? "scene_first_frame" : undefined,
           image_id: image?.id,
           model,
           resolution,
@@ -607,9 +608,9 @@ export function CreatePage() {
         <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
           <div>
             <label className="label">
-              Reference image · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>optional — leave empty for text-to-video</em>
+              Scene first frame · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>optional — leave empty for text-to-video</em>
             </label>
-            <DropZone onFile={onPickFile} image={image} onClear={() => setImage(null)} hint={"Drop image for I→V, or skip for T→V"} />
+            <DropZone onFile={onPickFile} image={image} onClear={() => setImage(null)} hint={"Drop an actual scene frame for I→V, or skip for T→V"} />
             {state.images.length > 0 && !image && (
               <div style={{ marginTop: 14 }}>
                 <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", marginBottom: 8 }}>
@@ -640,7 +641,7 @@ export function CreatePage() {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder={mode === "i2v"
-                ? "Describe motion: 'camera pushes in slowly, steam curls, light flickers...'"
+                ? "Describe motion after this scene frame: 'camera pushes in slowly, steam curls, light flickers...'"
                 : "Describe the shot: subject, environment, motion, lens, mood, lighting..."}
               style={{ minHeight: 140 }}
             />
@@ -654,7 +655,7 @@ export function CreatePage() {
         <aside style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div className="chip" style={{ alignSelf: "flex-start" }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: image ? "var(--accent-2)" : "var(--fg-3)", display: "inline-block" }}/>
-            {image ? "Image → Video" : "Text → Video"} · auto
+            {image ? "Scene frame → Video" : "Text → Video"} · auto
           </div>
 
           <ParamRow label="Model">
@@ -1043,7 +1044,7 @@ export function PreviewPage() {
             if (!refSrc) return null;
             return (
               <div>
-                <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>Reference</div>
+                <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>Scene frame</div>
                 <div className="img-tile" style={{ aspectRatio: "16/9", height: 140 }}>
                   <img src={refSrc} alt=""/>
                 </div>
@@ -1120,7 +1121,7 @@ export function LibraryPage() {
                    style={{ display: "none" }}
                    onChange={(e) => onUpload(e.target.files)} />
             <span className="mono muted-2" style={{ fontSize: 11, letterSpacing: ".1em", alignSelf: "center" }}>
-              Drag any tile onto Create to use as reference
+              Drag any tile onto Create to use as a scene frame
             </span>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))", gap: 14 }}>

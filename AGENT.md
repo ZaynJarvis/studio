@@ -34,13 +34,13 @@ index.html          — Google Fonts links, data-theme="studio" on <body>
 | Page | Hash route | Purpose |
 |------|-----------|---------|
 | Home | `#/` | Hero section + video gallery grid. "Use as template" on each card → prefills Create |
-| Create | `#/create` | Image dropzone (optional, auto-derives I→V vs T→V) + prompt + Seedance params. Fake generation progress overlay |
+| Create | `#/create` | Scene first-frame dropzone (optional, auto-derives I→V vs T→V) + prompt + Seedance params. Fake generation progress overlay |
 | Preview | `#/preview?id=...` | Custom video player + params sidebar. Download, delete, remix actions |
 | Library | `#/library` | Two tabs: Images (upload, drag-to-reuse, delete) and Videos (grid with delete) |
 
 ## Key conventions
 
-- **Mode is implicit**: if reference image is present → I→V, otherwise → T→V. No mode toggle
+- **Mode is implicit**: if a scene first-frame image is present → I→V, otherwise → T→V. Character sheets, info graphs, turnarounds, and reference boards are not first-frame inputs; generate an actual scene/storyboard frame with imagegen first
 - **Ark API key**: held by the server (`ARK_API_KEY` env). The frontend never sees it
 - **Web access gate**: if `MCP_TOKEN` is set on the server, the SPA shows a login screen on first load; the token (same one used for `/mcp` bearer auth) is stored in `localStorage["vgs.accessToken"]` and sent as `Authorization: Bearer ...` (or `?access_token=...`) on every `/api/*` and `/state/tasks.json` call. `/healthz`, `/media/*`, and static assets stay open. Leaving the env unset disables the gate (dev mode)
 - **Template flow**: any video can prefill Create via `?from=<videoId>` query param

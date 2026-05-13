@@ -46,6 +46,24 @@ const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1
 const shutdownGraceMs = clampInt(process.env.SHUTDOWN_GRACE_MS, 1_000, 60_000, 20_000);
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]);
+const referenceOnlyImageRoles = new Set([
+  "character_reference",
+  "character_sheet",
+  "infographic",
+  "info_graph",
+  "model_sheet",
+  "reference",
+  "reference_only",
+  "turnaround",
+]);
+const sceneFrameImageRoles = new Set([
+  "first_frame",
+  "image_to_video",
+  "i2v",
+  "scene_first_frame",
+  "scene_frame",
+  "source_frame",
+]);
 const pollTimers = new Map();
 const backgroundTimers = new Set();
 const backgroundJobs = new Set();
@@ -153,6 +171,55 @@ function normalizeStatus(status) {
   if (raw === "completed" || raw === "complete") return "succeeded";
   if (raw === "error") return "failed";
   return raw;
+}
+
+function normalizeImageRole(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (!raw) return null;
+  if (referenceOnlyImageRoles.has(raw)) return "character_reference";
+  if (sceneFrameImageRoles.has(raw)) return "scene_first_frame";
+  return raw;
+}
+
+function promptMentionsReferenceAsset(prompt) {
+  const text = String(prompt || "");
+  const lower = text.toLowerCase();
+  return [
+    /\bcharacter\s+(reference|sheet|design sheet|model sheet|turnaround|infographic)\b/,
+    /\b(reference|model|turnaround|design)\s+(image|sheet|board|plate)\b/,
+    /\binfo\s*graph(?:ic)?\b/,
+    /\bstyle\s+sheet\b/,
+    /角色.{0,8}(参考|设定|表|图|三视|转面|信息图)/,
+    /(参考图|设定图|角色表|三视图|转面图|信息图|信息图表)/,
+  ].some((pattern) => pattern.test(lower) || pattern.test(text));
+}
+
+function promptTreatsImageAsOpeningFrame(prompt) {
+  const text = String(prompt || "");
+  const lower = text.toLowerCase();
+  return [
+    /\b(first|opening|initial|starting)\s+(frame|image|shot)\b/,
+    /\b(start|starts|begin|begins|open|opens)\s+(with|from)\b/,
+    /\banimat(?:e|es|ed|ing)\s+(?:from|the)?\s*(?:reference|character|sheet|infographic|image)/,
+    /(首帧|第一帧|开场|开头|起始帧|起始画面)/,
+    /(从|以).{0,12}(参考图|设定图|角色表|信息图|首帧|第一帧).{0,12}(开始|开场|生成|动起来)/,
+  ].some((pattern) => pattern.test(lower) || pattern.test(text));
+}
+
+function rejectReferenceAsFirstFrame(message) {
+  throw httpError(400, "reference_requires_scene_frame", message || [
+    "Character sheets, infographics, turnarounds, and reference boards are visual references for imagegen, not Seedance first frames.",
+    "Use imagegen with thinking to create the actual storyboard/scene frame first, then call create_video_task with that scene frame as image_url and image_role=\"scene_first_frame\".",
+  ].join(" "));
+}
+
+function assertVideoPromptDoesNotUseReferenceAsFirstFrame(prompt) {
+  if (promptMentionsReferenceAsset(prompt) && promptTreatsImageAsOpeningFrame(prompt)) {
+    rejectReferenceAsFirstFrame("The prompt appears to describe a character sheet/infographic/reference board as the opening or first frame. Rewrite the video prompt around the real scene action, and generate the scene frame with imagegen before creating the video task.");
+  }
 }
 
 function resolveModel() {
@@ -325,6 +392,7 @@ function publicTaskThumbUrl(task) {
   const raw = String(task.thumb || "");
   if (!raw) return null;
   if (task.inputImageUrl && raw === String(task.inputImageUrl)) return null;
+  if (task.referenceImageUrl && raw === String(task.referenceImageUrl)) return null;
   return publicThumbUrl(raw);
 }
 
@@ -373,8 +441,12 @@ function publicTask(task) {
     duration: task.duration,
     camera: task.camera,
     seed: task.seed,
+    image_role: task.imageRole || (task.inputImageUrl ? "scene_first_frame" : task.referenceImageUrl ? "character_reference" : "none"),
     image_id: task.imageId || null,
+    source_frame_url: publicMediaUrl(task.inputImageUrl) || null,
     reference_image_url: publicMediaUrl(task.inputImageUrl) || null,
+    character_reference_url: publicMediaUrl(task.referenceImageUrl) || null,
+    character_reference_bytes: task.referenceImageBytes || null,
     reference_image_bytes: task.inputImageBytes || null,
     thumb: publicTaskThumbUrl(task),
     created_at: task.createdAt,
@@ -641,13 +713,39 @@ function normalizeGenerateInput(input) {
   if (!prompt) {
     throw httpError(400, "prompt_required", "Prompt is required.");
   }
+  assertVideoPromptDoesNotUseReferenceAsFirstFrame(prompt);
 
   const rawImageUrl = input.image_url || input.imageUrl || input.image?.src || null;
+  const rawReferenceImageUrl = input.reference_image_url
+    || input.referenceImageUrl
+    || input.character_reference_url
+    || input.characterReferenceUrl
+    || null;
+  if (rawReferenceImageUrl && !rawImageUrl) {
+    rejectReferenceAsFirstFrame("reference_image_url is metadata only and is not sent to Seedance. Use imagegen with thinking to create the actual storyboard/scene frame first, then call create_video_task with that scene frame as image_url.");
+  }
+
+  const requestedImageRole = normalizeImageRole(input.image_role || input.imageRole || input.image?.role);
+  if (requestedImageRole && requestedImageRole !== "scene_first_frame" && requestedImageRole !== "character_reference") {
+    throw httpError(400, "image_role_invalid", "image_role must be scene_first_frame. Character/reference images must be converted into a real scene frame with imagegen before video generation.");
+  }
+  const inferredReferenceRole = !requestedImageRole && rawImageUrl && !rawReferenceImageUrl && promptMentionsReferenceAsset(prompt);
+  if (rawImageUrl && (requestedImageRole === "character_reference" || inferredReferenceRole)) {
+    rejectReferenceAsFirstFrame();
+  }
   const persistedImage = persistInputImage(rawImageUrl);
+  const persistedReferenceImage = persistInputImage(rawReferenceImageUrl);
   const imageUrl = persistedImage?.url || rawImageUrl;
+  const referenceImageUrl = persistedReferenceImage?.url || rawReferenceImageUrl;
   const rawThumb = input.thumb || null;
   const safeThumb = String(rawThumb || "").startsWith("data:") ? null : rawThumb;
-  const thumb = safeThumb && safeThumb !== rawImageUrl && safeThumb !== imageUrl ? safeThumb : null;
+  const thumb = safeThumb
+    && safeThumb !== rawImageUrl
+    && safeThumb !== imageUrl
+    && safeThumb !== rawReferenceImageUrl
+    && safeThumb !== referenceImageUrl
+    ? safeThumb
+    : null;
 
   const mode = imageUrl ? "i2v" : "t2v";
   const duration = clampInt(input.duration_seconds ?? input.duration, 5, 15, 5);
@@ -665,6 +763,11 @@ function normalizeGenerateInput(input) {
     inputImageUrl: persistedImage?.mediaPath || imageUrl || null,
     inputImageBytes: persistedImage?.bytes || null,
     inputImageMime: persistedImage?.mime || null,
+    referenceImagePath: persistedReferenceImage?.path || null,
+    referenceImageUrl: persistedReferenceImage?.mediaPath || referenceImageUrl || null,
+    referenceImageBytes: persistedReferenceImage?.bytes || null,
+    referenceImageMime: persistedReferenceImage?.mime || null,
+    imageRole: imageUrl ? "scene_first_frame" : "none",
     imageId: input.image_id || input.imageId || null,
     thumb,
     mode,
@@ -932,6 +1035,11 @@ async function createVideoTask(rawInput) {
     inputImageUrl: input.inputImageUrl,
     inputImageBytes: input.inputImageBytes,
     inputImageMime: input.inputImageMime,
+    referenceImagePath: input.referenceImagePath,
+    referenceImageUrl: input.referenceImageUrl,
+    referenceImageBytes: input.referenceImageBytes,
+    referenceImageMime: input.referenceImageMime,
+    imageRole: input.imageRole,
     thumb: input.thumb,
     videoUrl: null,
     sourceVideoUrl: null,
@@ -1093,6 +1201,12 @@ async function handleDeleteTask(req, res, id) {
       try { rmSync(inputImagePath, { force: true }); } catch {}
     }
   }
+  if (task.referenceImagePath) {
+    const referenceImagePath = resolve(publicDataDir, task.referenceImagePath);
+    if (referenceImagePath.startsWith(publicDataDir)) {
+      try { rmSync(referenceImagePath, { force: true }); } catch {}
+    }
+  }
 
   tasks.delete(id);
   saveTasks();
@@ -1164,12 +1278,14 @@ function mcpTools() {
   return [
     {
       name: "create_video_task",
-      description: "Create a Seedance 2.0 Pro video generation task and persist it in the server queue.",
+      description: "Create a Studio/Seedance 2.0 Pro video task from text or an actual scene first frame. Character sheets, info graphs, turnarounds, and reference boards are not valid first frames: use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame here.",
       inputSchema: {
         type: "object",
         properties: {
-          prompt: { type: "string", description: "Video prompt. Required." },
-          image_url: { type: "string", description: "Optional image-to-video source image URL. For character sheets/info graphs, first generate a scene frame and pass that instead." },
+          prompt: { type: "string", description: "Video prompt for the real scene action. Do not describe a character sheet/info graph/reference board as the opening frame or first frame." },
+          image_url: { type: "string", description: "Optional actual scene first-frame image URL for image-to-video. Seedance treats this as the first video frame. Never pass a character sheet, info graph, turnaround, or reference board here." },
+          image_role: { type: "string", enum: ["scene_first_frame"], description: "Role of image_url. Must be scene_first_frame when image_url is present." },
+          reference_image_url: { type: "string", description: "Optional character reference URL for traceability only; it is not sent to Seedance. If this is the only image you have, stop and use imagegen with thinking to create a real scene frame before calling this tool." },
           image_id: { type: "string", description: "Optional reference image id." },
           thumb: { type: "string", description: "Optional preview thumbnail URL. Do not pass the character reference image as the thumbnail." },
           resolution: { type: "string", enum: ["720p", "1080p", "2K"], default: "1080p" },
@@ -1726,6 +1842,7 @@ const server = createServer(async (req, res) => {
       artifacts: [...tasks.values()].filter((task) => task.artifactUrl).length,
       covers: [...tasks.values()].filter((task) => task.coverUrl).length,
       input_images: [...tasks.values()].filter((task) => task.inputImagePath).length,
+      reference_images: [...tasks.values()].filter((task) => task.referenceImagePath).length,
     });
     return;
   }

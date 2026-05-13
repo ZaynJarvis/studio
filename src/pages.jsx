@@ -41,6 +41,7 @@ function videoPatchFromTask(task, current = {}) {
   const monitorMode = task.monitor_mode || current.monitorMode || "poll";
   const progress = task.progress ?? (monitorMode === "webhook" && isActiveTask(status) ? null : current.progress ?? 0);
   const remoteThumb = task.cover_url || (task.thumb && !String(task.thumb).startsWith("data:") ? task.thumb : "");
+  const referenceImageUrl = task.reference_image_url || current.referenceImageUrl || null;
 
   return {
     id: current.id || task.id,
@@ -55,6 +56,7 @@ function videoPatchFromTask(task, current = {}) {
     prompt: task.prompt || current.prompt || "",
     src: task.video_url || current.src || "",
     thumb: remoteThumb || "",
+    referenceImageUrl,
     duration: task.duration || current.duration || 5,
     resolution: task.resolution || current.resolution || "1080p",
     aspect: task.aspect || current.aspect || "16:9",
@@ -113,11 +115,6 @@ async function fetchJson(path, options = {}) {
     throw error;
   }
   return data;
-}
-
-function remoteThumb(value) {
-  const raw = String(value || "");
-  return raw && !raw.startsWith("data:") ? raw : undefined;
 }
 
 async function deleteRemoteTask(v) {
@@ -484,7 +481,6 @@ export function CreatePage() {
           prompt,
           image_url: imageSrc,
           image_id: image?.id,
-          thumb: remoteThumb(imageSrc),
           model,
           resolution,
           aspect,
@@ -495,7 +491,7 @@ export function CreatePage() {
       });
       const v = addVideo(videoPatchFromTask(task, {
         id: task.id,
-        thumb: image?.src,
+        referenceImageUrl: image?.src || null,
         imageId: image?.id,
       }));
       navigate("/preview", { id: v.id });
@@ -869,14 +865,15 @@ export function PreviewPage() {
               ["created", fmtDate(v.createdAt) + " · " + relTime(v.createdAt)],
             ]}/>
           </div>
-          {v.imageId && (() => {
+          {(v.imageId || v.referenceImageUrl) && (() => {
             const ref = state.images.find((i) => i.id === v.imageId);
-            if (!ref) return null;
+            const refSrc = ref?.src || v.referenceImageUrl;
+            if (!refSrc) return null;
             return (
               <div>
                 <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>Reference</div>
                 <div className="img-tile" style={{ aspectRatio: "16/9", height: 140 }}>
-                  <img src={ref.src} alt=""/>
+                  <img src={refSrc} alt=""/>
                 </div>
               </div>
             );

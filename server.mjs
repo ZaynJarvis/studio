@@ -286,8 +286,19 @@ function estimateProgress(task) {
   return Math.max(30, estimate);
 }
 
+function versionedLocalMediaUrl(path, version) {
+  const raw = String(path || "");
+  if (!raw) return null;
+  if (!raw.startsWith("/media/")) return raw;
+  if (!version) return raw;
+  return `${raw}${raw.includes("?") ? "&" : "?"}v=${encodeURIComponent(String(version))}`;
+}
+
 function publicVideoUrl(task) {
-  return task.artifactUrl || task.videoUrl || null;
+  if (task.artifactUrl) {
+    return versionedLocalMediaUrl(task.artifactUrl, task.artifactCachedAt || task.updatedAt || task.finishedAt);
+  }
+  return task.videoUrl || null;
 }
 
 function publicThumbUrl(value) {
@@ -295,6 +306,17 @@ function publicThumbUrl(value) {
   if (!raw || raw.startsWith("data:")) return null;
   if (raw.length > 2048) return null;
   return raw;
+}
+
+function publicTaskThumbUrl(task) {
+  if (task.coverUrl) {
+    return publicThumbUrl(versionedLocalMediaUrl(task.coverUrl, task.coverGeneratedAt || task.updatedAt || task.finishedAt));
+  }
+
+  const raw = String(task.thumb || "");
+  if (!raw) return null;
+  if (task.inputImageUrl && raw === String(task.inputImageUrl)) return null;
+  return publicThumbUrl(raw);
 }
 
 function publicMediaUrl(path) {
@@ -319,11 +341,15 @@ function publicTask(task) {
     status: task.status,
     progress: activeWebhookTask ? null : estimateProgress(task),
     video_url: publicVideoUrl(task),
-    artifact_url: task.artifactUrl || null,
+    artifact_url: task.artifactUrl
+      ? versionedLocalMediaUrl(task.artifactUrl, task.artifactCachedAt || task.updatedAt || task.finishedAt)
+      : null,
     artifact_status: task.artifactStatus || (task.artifactUrl ? "ready" : null),
     artifact_bytes: task.artifactBytes || null,
     artifact_error: task.artifactError || null,
-    cover_url: task.coverUrl || null,
+    cover_url: task.coverUrl
+      ? versionedLocalMediaUrl(task.coverUrl, task.coverGeneratedAt || task.updatedAt || task.finishedAt)
+      : null,
     cover_status: task.coverStatus || (task.coverUrl ? "ready" : null),
     cover_bytes: task.coverBytes || null,
     cover_error: task.coverError || null,
@@ -341,7 +367,7 @@ function publicTask(task) {
     image_id: task.imageId || null,
     reference_image_url: publicMediaUrl(task.inputImageUrl) || null,
     reference_image_bytes: task.inputImageBytes || null,
-    thumb: publicThumbUrl(task.coverUrl || task.thumb),
+    thumb: publicTaskThumbUrl(task),
     created_at: task.createdAt,
     updated_at: task.updatedAt,
     finished_at: task.finishedAt || null,
@@ -588,8 +614,9 @@ function normalizeGenerateInput(input) {
   const rawImageUrl = input.image_url || input.imageUrl || input.image?.src || null;
   const persistedImage = persistInputImage(rawImageUrl);
   const imageUrl = persistedImage?.url || rawImageUrl;
-  const rawThumb = input.thumb || rawImageUrl || null;
-  const thumb = persistedImage?.mediaPath || (String(rawThumb || "").startsWith("data:") ? null : rawThumb) || imageUrl || null;
+  const rawThumb = input.thumb || null;
+  const safeThumb = String(rawThumb || "").startsWith("data:") ? null : rawThumb;
+  const thumb = safeThumb && safeThumb !== rawImageUrl && safeThumb !== imageUrl ? safeThumb : null;
 
   const mode = imageUrl ? "i2v" : "t2v";
   const duration = clampInt(input.duration_seconds ?? input.duration, 5, 15, 5);
@@ -1083,9 +1110,9 @@ function mcpTools() {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Video prompt. Required." },
-          image_url: { type: "string", description: "Optional reference image URL for image-to-video." },
+          image_url: { type: "string", description: "Optional image-to-video source image URL. For character sheets/info graphs, first generate a scene frame and pass that instead." },
           image_id: { type: "string", description: "Optional reference image id." },
-          thumb: { type: "string", description: "Optional thumbnail URL." },
+          thumb: { type: "string", description: "Optional preview thumbnail URL. Do not pass the character reference image as the thumbnail." },
           resolution: { type: "string", enum: ["720p", "1080p", "2K"], default: "1080p" },
           aspect: { type: "string", enum: ["16:9", "9:16", "1:1"], default: "16:9" },
           duration: { type: "integer", minimum: 5, maximum: 15, default: 5 },
@@ -1426,11 +1453,75 @@ function resolveDataAsset(urlPath) {
   return null;
 }
 
+function parseRangeHeader(rangeHeader, size) {
+  const match = String(rangeHeader || "").match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) return null;
+
+  const [, startRaw, endRaw] = match;
+  if (!startRaw && !endRaw) return { invalid: true };
+
+  if (!startRaw) {
+    const suffixLength = Number.parseInt(endRaw, 10);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return { invalid: true };
+    return {
+      start: Math.max(size - suffixLength, 0),
+      end: size - 1,
+    };
+  }
+
+  const start = Number.parseInt(startRaw, 10);
+  const end = endRaw ? Number.parseInt(endRaw, 10) : size - 1;
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start >= size || end < start) {
+    return { invalid: true };
+  }
+
+  return {
+    start,
+    end: Math.min(end, size - 1),
+  };
+}
+
 function sendFile(req, res, filePath, cacheControl) {
   const ext = extname(filePath);
-  res.writeHead(200, {
+  const { size } = statSync(filePath);
+  const baseHeaders = {
     "content-type": contentTypes[ext] || "application/octet-stream",
     "cache-control": cacheControl,
+    "accept-ranges": "bytes",
+  };
+
+  const range = parseRangeHeader(req.headers.range, size);
+  if (range?.invalid) {
+    res.writeHead(416, {
+      ...baseHeaders,
+      "content-range": `bytes */${size}`,
+      "content-length": "0",
+    });
+    res.end();
+    return;
+  }
+
+  if (range) {
+    const chunkSize = range.end - range.start + 1;
+    res.writeHead(206, {
+      ...baseHeaders,
+      "content-range": `bytes ${range.start}-${range.end}/${size}`,
+      "content-length": String(chunkSize),
+    });
+
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+
+    createReadStream(filePath, { start: range.start, end: range.end }).pipe(res);
+    return;
+  }
+
+  res.writeHead(200, {
+    ...baseHeaders,
+    "content-length": String(size),
   });
 
   if (req.method === "HEAD") {

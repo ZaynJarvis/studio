@@ -209,11 +209,15 @@ function promptTreatsImageAsOpeningFrame(prompt) {
   ].some((pattern) => pattern.test(lower) || pattern.test(text));
 }
 
+function referenceWorkflowMessage() {
+  return [
+    "Character sheets, infographics, turnarounds, and reference boards are identity references, not Seedance first frames.",
+    "Pass them as reference_image_url, or use imagegen with thinking to create the actual storyboard/scene frame first and pass that frame as image_url with image_role=\"scene_first_frame\".",
+  ].join(" ");
+}
+
 function rejectReferenceAsFirstFrame(message) {
-  throw httpError(400, "reference_requires_scene_frame", message || [
-    "Character sheets, infographics, turnarounds, and reference boards are visual references for imagegen, not Seedance first frames.",
-    "Use imagegen with thinking to create the actual storyboard/scene frame first, then call create_video_task with that scene frame as image_url and image_role=\"scene_first_frame\".",
-  ].join(" "));
+  throw httpError(400, "reference_requires_scene_frame", message || referenceWorkflowMessage());
 }
 
 function assertVideoPromptDoesNotUseReferenceAsFirstFrame(prompt) {
@@ -715,23 +719,21 @@ function normalizeGenerateInput(input) {
   }
   assertVideoPromptDoesNotUseReferenceAsFirstFrame(prompt);
 
-  const rawImageUrl = input.image_url || input.imageUrl || input.image?.src || null;
-  const rawReferenceImageUrl = input.reference_image_url
+  let rawImageUrl = input.image_url || input.imageUrl || input.image?.src || null;
+  let rawReferenceImageUrl = input.reference_image_url
     || input.referenceImageUrl
     || input.character_reference_url
     || input.characterReferenceUrl
     || null;
-  if (rawReferenceImageUrl && !rawImageUrl) {
-    rejectReferenceAsFirstFrame("reference_image_url is metadata only and is not sent to Seedance. Use imagegen with thinking to create the actual storyboard/scene frame first, then call create_video_task with that scene frame as image_url.");
-  }
 
   const requestedImageRole = normalizeImageRole(input.image_role || input.imageRole || input.image?.role);
   if (requestedImageRole && requestedImageRole !== "scene_first_frame" && requestedImageRole !== "character_reference") {
-    throw httpError(400, "image_role_invalid", "image_role must be scene_first_frame. Character/reference images must be converted into a real scene frame with imagegen before video generation.");
+    throw httpError(400, "image_role_invalid", "image_role must be scene_first_frame or character_reference.");
   }
   const inferredReferenceRole = !requestedImageRole && rawImageUrl && !rawReferenceImageUrl && promptMentionsReferenceAsset(prompt);
   if (rawImageUrl && (requestedImageRole === "character_reference" || inferredReferenceRole)) {
-    rejectReferenceAsFirstFrame();
+    rawReferenceImageUrl = rawReferenceImageUrl || rawImageUrl;
+    rawImageUrl = null;
   }
   const persistedImage = persistInputImage(rawImageUrl);
   const persistedReferenceImage = persistInputImage(rawReferenceImageUrl);
@@ -747,7 +749,7 @@ function normalizeGenerateInput(input) {
     ? safeThumb
     : null;
 
-  const mode = imageUrl ? "i2v" : "t2v";
+  const mode = imageUrl ? "i2v" : referenceImageUrl ? "ref2v" : "t2v";
   const duration = clampInt(input.duration_seconds ?? input.duration, 5, 15, 5);
   const seed = clampInt(input.seed, -1, 4_294_967_295, Math.floor(Math.random() * 99_999));
   const resolution = normalizeResolution(input.resolution || "1080p");
@@ -767,7 +769,7 @@ function normalizeGenerateInput(input) {
     referenceImageUrl: persistedReferenceImage?.mediaPath || referenceImageUrl || null,
     referenceImageBytes: persistedReferenceImage?.bytes || null,
     referenceImageMime: persistedReferenceImage?.mime || null,
-    imageRole: imageUrl ? "scene_first_frame" : "none",
+    imageRole: imageUrl ? "scene_first_frame" : referenceImageUrl ? "character_reference" : "none",
     imageId: input.image_id || input.imageId || null,
     thumb,
     mode,
@@ -798,6 +800,13 @@ function toArkBody(input, localTaskId) {
 
   if (input.imageUrl) {
     content.push({ type: "image_url", image_url: { url: input.imageUrl } });
+  }
+  if (input.referenceImageUrl) {
+    content.push({
+      type: "image_url",
+      image_url: { url: input.referenceImageUrl },
+      role: "reference_image",
+    });
   }
 
   const body = {
@@ -1065,6 +1074,7 @@ function inputFromTask(task) {
   return {
     prompt: task.prompt,
     imageUrl: publicMediaUrl(task.inputImageUrl) || null,
+    referenceImageUrl: publicMediaUrl(task.referenceImageUrl) || null,
     resolution: task.resolution,
     aspect: task.aspect,
     duration: task.duration,
@@ -1278,14 +1288,14 @@ function mcpTools() {
   return [
     {
       name: "create_video_task",
-      description: "Create a Studio/Seedance 2.0 Pro video task from text or an actual scene first frame. Character sheets, info graphs, turnarounds, and reference boards are not valid first frames: use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame here.",
+      description: "Create a Studio/Seedance 2.0 Pro video task from text, an actual scene first frame, and/or an Ark reference image. Character sheets, info graphs, turnarounds, and reference boards must be passed as reference_image_url, never as image_url. For best shot control, use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame as image_url.",
       inputSchema: {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Video prompt for the real scene action. Do not describe a character sheet/info graph/reference board as the opening frame or first frame." },
           image_url: { type: "string", description: "Optional actual scene first-frame image URL for image-to-video. Seedance treats this as the first video frame. Never pass a character sheet, info graph, turnaround, or reference board here." },
-          image_role: { type: "string", enum: ["scene_first_frame"], description: "Role of image_url. Must be scene_first_frame when image_url is present." },
-          reference_image_url: { type: "string", description: "Optional character reference URL for traceability only; it is not sent to Seedance. If this is the only image you have, stop and use imagegen with thinking to create a real scene frame before calling this tool." },
+          image_role: { type: "string", enum: ["scene_first_frame", "character_reference"], description: "Role of image_url. Use scene_first_frame for an actual opening scene frame; use character_reference only when intentionally passing a character sheet/info graph as reference input." },
+          reference_image_url: { type: "string", description: "Optional character reference image URL. Sent to Ark as an image_url content item with role=reference_image, not as the first frame." },
           image_id: { type: "string", description: "Optional reference image id." },
           thumb: { type: "string", description: "Optional preview thumbnail URL. Do not pass the character reference image as the thumbnail." },
           resolution: { type: "string", enum: ["720p", "1080p", "2K"], default: "1080p" },

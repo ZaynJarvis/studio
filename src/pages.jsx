@@ -42,6 +42,7 @@ function videoPatchFromTask(task, current = {}) {
   const progress = task.progress ?? (monitorMode === "webhook" && isActiveTask(status) ? null : current.progress ?? 0);
   const remoteThumb = task.cover_url || (task.thumb && !String(task.thumb).startsWith("data:") ? task.thumb : "");
   const referenceImageUrl = task.source_frame_url || task.reference_image_url || current.referenceImageUrl || null;
+  const characterReferenceUrl = task.character_reference_url || current.characterReferenceUrl || null;
 
   return {
     id: current.id || task.id,
@@ -57,6 +58,7 @@ function videoPatchFromTask(task, current = {}) {
     src: task.video_url || current.src || "",
     thumb: remoteThumb || "",
     referenceImageUrl,
+    characterReferenceUrl,
     duration: task.duration || current.duration || 5,
     resolution: task.resolution || current.resolution || "1080p",
     aspect: task.aspect || current.aspect || "16:9",
@@ -83,7 +85,14 @@ function taskBadgeText(v) {
   const failed = TERMINAL_TASK_STATUSES.has(v.status) && v.status !== "succeeded";
   if (active && v.monitorMode === "webhook") return "RENDERING";
   if (active || failed) return String(v.status || "queued").toUpperCase();
+  if (v.mode === "ref2v") return "REF→V";
   return v.mode === "i2v" ? "I→V" : "T→V";
+}
+
+function modeLabel(mode) {
+  if (mode === "i2v") return "image → video";
+  if (mode === "ref2v") return "reference → video";
+  return "text → video";
 }
 
 function taskSort(a, b) {
@@ -1029,7 +1038,7 @@ export function PreviewPage() {
               ["status", v.status || "ready"],
               ...(v.taskId ? [["task", v.taskId.slice(0, 22)]] : []),
               ["model", v.model],
-              ["mode", v.mode === "i2v" ? "image → video" : "text → video"],
+              ["mode", modeLabel(v.mode)],
               ["resolution", v.resolution],
               ["aspect", v.aspect],
               ["duration", v.duration + "s · 24fps"],
@@ -1038,13 +1047,15 @@ export function PreviewPage() {
               ["created", fmtDate(v.createdAt) + " · " + relTime(v.createdAt)],
             ]}/>
           </div>
-          {(v.imageId || v.referenceImageUrl) && (() => {
+          {(v.imageId || v.referenceImageUrl || v.characterReferenceUrl) && (() => {
             const ref = state.images.find((i) => i.id === v.imageId);
-            const refSrc = ref?.src || v.referenceImageUrl;
+            const refSrc = ref?.src || v.referenceImageUrl || v.characterReferenceUrl;
             if (!refSrc) return null;
             return (
               <div>
-                <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>Scene frame</div>
+                <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>
+                  {v.mode === "ref2v" ? "Character reference" : "Scene frame"}
+                </div>
                 <div className="img-tile" style={{ aspectRatio: "16/9", height: 140 }}>
                   <img src={refSrc} alt=""/>
                 </div>

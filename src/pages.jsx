@@ -42,7 +42,12 @@ function videoPatchFromTask(task, current = {}) {
   const progress = task.progress ?? (monitorMode === "webhook" && isActiveTask(status) ? null : current.progress ?? 0);
   const remoteThumb = task.cover_url || (task.thumb && !String(task.thumb).startsWith("data:") ? task.thumb : "");
   const referenceImageUrl = task.source_frame_url || task.reference_image_url || current.referenceImageUrl || null;
-  const characterReferenceUrl = task.character_reference_url || current.characterReferenceUrl || null;
+  const characterReferenceUrls = Array.isArray(task.character_reference_urls) && task.character_reference_urls.length
+    ? task.character_reference_urls
+    : task.character_reference_url
+      ? [task.character_reference_url]
+      : current.characterReferenceUrls || [];
+  const characterReferenceUrl = characterReferenceUrls[0] || current.characterReferenceUrl || null;
 
   return {
     id: current.id || task.id,
@@ -58,7 +63,9 @@ function videoPatchFromTask(task, current = {}) {
     src: task.video_url || current.src || "",
     thumb: remoteThumb || "",
     referenceImageUrl,
+    lastFrameUrl: task.last_frame_url || current.lastFrameUrl || null,
     characterReferenceUrl,
+    characterReferenceUrls,
     duration: task.duration || current.duration || 5,
     resolution: task.resolution || current.resolution || "1080p",
     aspect: task.aspect || current.aspect || "16:9",

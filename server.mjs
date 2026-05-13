@@ -184,6 +184,19 @@ function normalizeImageRole(value) {
   return raw;
 }
 
+function normalizeUrlList(value) {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  const seen = new Set();
+  const urls = [];
+  for (const item of values) {
+    const url = String(item || "").trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    urls.push(url);
+  }
+  return urls;
+}
+
 function promptMentionsReferenceAsset(prompt) {
   const text = String(prompt || "");
   const lower = text.toLowerCase();
@@ -396,7 +409,9 @@ function publicTaskThumbUrl(task) {
   const raw = String(task.thumb || "");
   if (!raw) return null;
   if (task.inputImageUrl && raw === String(task.inputImageUrl)) return null;
+  if (task.lastFrameImageUrl && raw === String(task.lastFrameImageUrl)) return null;
   if (task.referenceImageUrl && raw === String(task.referenceImageUrl)) return null;
+  if (normalizeUrlList(task.referenceImageUrls).includes(raw)) return null;
   return publicThumbUrl(raw);
 }
 
@@ -448,10 +463,13 @@ function publicTask(task) {
     image_role: task.imageRole || (task.inputImageUrl ? "scene_first_frame" : task.referenceImageUrl ? "character_reference" : "none"),
     image_id: task.imageId || null,
     source_frame_url: publicMediaUrl(task.inputImageUrl) || null,
+    last_frame_url: publicMediaUrl(task.lastFrameImageUrl) || null,
     reference_image_url: publicMediaUrl(task.inputImageUrl) || null,
     character_reference_url: publicMediaUrl(task.referenceImageUrl) || null,
+    character_reference_urls: normalizeUrlList(task.referenceImageUrls || task.referenceImageUrl).map(publicMediaUrl),
     character_reference_bytes: task.referenceImageBytes || null,
     reference_image_bytes: task.inputImageBytes || null,
+    last_frame_bytes: task.lastFrameImageBytes || null,
     thumb: publicTaskThumbUrl(task),
     created_at: task.createdAt,
     updated_at: task.updatedAt,
@@ -720,22 +738,29 @@ function normalizeGenerateInput(input) {
   assertVideoPromptDoesNotUseReferenceAsFirstFrame(prompt);
 
   let rawImageUrl = input.image_url || input.imageUrl || input.image?.src || null;
-  let rawReferenceImageUrl = input.reference_image_url
-    || input.referenceImageUrl
-    || input.character_reference_url
-    || input.characterReferenceUrl
+  const rawLastFrameImageUrl = input.last_frame_image_url
+    || input.lastFrameImageUrl
+    || input.last_image_url
+    || input.lastImageUrl
     || null;
+  let rawReferenceImageUrls = normalizeUrlList([
+    ...normalizeUrlList(input.reference_image_url || input.referenceImageUrl || input.character_reference_url || input.characterReferenceUrl),
+    ...normalizeUrlList(input.reference_image_urls || input.referenceImageUrls || input.character_reference_urls || input.characterReferenceUrls),
+  ]);
 
   const requestedImageRole = normalizeImageRole(input.image_role || input.imageRole || input.image?.role);
   if (requestedImageRole && requestedImageRole !== "scene_first_frame" && requestedImageRole !== "character_reference") {
     throw httpError(400, "image_role_invalid", "image_role must be scene_first_frame or character_reference.");
   }
-  const inferredReferenceRole = !requestedImageRole && rawImageUrl && !rawReferenceImageUrl && promptMentionsReferenceAsset(prompt);
+  const inferredReferenceRole = !requestedImageRole && rawImageUrl && rawReferenceImageUrls.length === 0 && promptMentionsReferenceAsset(prompt);
   if (rawImageUrl && (requestedImageRole === "character_reference" || inferredReferenceRole)) {
-    rawReferenceImageUrl = rawReferenceImageUrl || rawImageUrl;
+    rawReferenceImageUrls = normalizeUrlList([...rawReferenceImageUrls, rawImageUrl]);
     rawImageUrl = null;
   }
-  if (rawImageUrl && rawReferenceImageUrl) {
+  if (rawLastFrameImageUrl && !rawImageUrl) {
+    throw httpError(400, "last_frame_requires_first_frame", "last_frame_image_url requires image_url as the first frame.");
+  }
+  if ((rawImageUrl || rawLastFrameImageUrl) && rawReferenceImageUrls.length > 0) {
     throw httpError(400, "mixed_frame_and_reference_not_supported", [
       "Ark video generation does not allow first/last frame content to be mixed with reference media content.",
       "For controlled character video, first use imagegen with thinking to create a scene frame from the character reference, then call create_video_task with only that scene frame as image_url.",
@@ -743,20 +768,25 @@ function normalizeGenerateInput(input) {
     ].join(" "));
   }
   const persistedImage = persistInputImage(rawImageUrl);
-  const persistedReferenceImage = persistInputImage(rawReferenceImageUrl);
+  const persistedLastFrameImage = persistInputImage(rawLastFrameImageUrl);
+  const persistedReferenceImages = rawReferenceImageUrls.map((url) => persistInputImage(url));
   const imageUrl = persistedImage?.url || rawImageUrl;
-  const referenceImageUrl = persistedReferenceImage?.url || rawReferenceImageUrl;
+  const lastFrameImageUrl = persistedLastFrameImage?.url || rawLastFrameImageUrl;
+  const referenceImageUrls = rawReferenceImageUrls.map((url, index) => persistedReferenceImages[index]?.url || url);
+  const storedReferenceImageUrls = rawReferenceImageUrls.map((url, index) => persistedReferenceImages[index]?.mediaPath || referenceImageUrls[index]);
   const rawThumb = input.thumb || null;
   const safeThumb = String(rawThumb || "").startsWith("data:") ? null : rawThumb;
   const thumb = safeThumb
     && safeThumb !== rawImageUrl
     && safeThumb !== imageUrl
-    && safeThumb !== rawReferenceImageUrl
-    && safeThumb !== referenceImageUrl
+    && safeThumb !== rawLastFrameImageUrl
+    && safeThumb !== lastFrameImageUrl
+    && !rawReferenceImageUrls.includes(safeThumb)
+    && !referenceImageUrls.includes(safeThumb)
     ? safeThumb
     : null;
 
-  const mode = imageUrl ? "i2v" : referenceImageUrl ? "ref2v" : "t2v";
+  const mode = imageUrl ? "i2v" : referenceImageUrls.length ? "ref2v" : "t2v";
   const duration = clampInt(input.duration_seconds ?? input.duration, 5, 15, 5);
   const seed = clampInt(input.seed, -1, 4_294_967_295, Math.floor(Math.random() * 99_999));
   const resolution = normalizeResolution(input.resolution || "1080p");
@@ -772,11 +802,17 @@ function normalizeGenerateInput(input) {
     inputImageUrl: persistedImage?.mediaPath || imageUrl || null,
     inputImageBytes: persistedImage?.bytes || null,
     inputImageMime: persistedImage?.mime || null,
-    referenceImagePath: persistedReferenceImage?.path || null,
-    referenceImageUrl: persistedReferenceImage?.mediaPath || referenceImageUrl || null,
-    referenceImageBytes: persistedReferenceImage?.bytes || null,
-    referenceImageMime: persistedReferenceImage?.mime || null,
-    imageRole: imageUrl ? "scene_first_frame" : referenceImageUrl ? "character_reference" : "none",
+    lastFrameImagePath: persistedLastFrameImage?.path || null,
+    lastFrameImageUrl: persistedLastFrameImage?.mediaPath || lastFrameImageUrl || null,
+    lastFrameImageBytes: persistedLastFrameImage?.bytes || null,
+    lastFrameImageMime: persistedLastFrameImage?.mime || null,
+    referenceImagePath: persistedReferenceImages[0]?.path || null,
+    referenceImagePaths: persistedReferenceImages.map((item) => item?.path || null).filter(Boolean),
+    referenceImageUrl: storedReferenceImageUrls[0] || null,
+    referenceImageUrls: storedReferenceImageUrls,
+    referenceImageBytes: persistedReferenceImages[0]?.bytes || null,
+    referenceImageMimes: persistedReferenceImages.map((item) => item?.mime || null),
+    imageRole: imageUrl ? "scene_first_frame" : referenceImageUrls.length ? "character_reference" : "none",
     imageId: input.image_id || input.imageId || null,
     thumb,
     mode,
@@ -812,10 +848,17 @@ function toArkBody(input, localTaskId) {
       role: "first_frame",
     });
   }
-  if (input.referenceImageUrl) {
+  if (input.lastFrameImageUrl) {
     content.push({
       type: "image_url",
-      image_url: { url: input.referenceImageUrl },
+      image_url: { url: input.lastFrameImageUrl },
+      role: "last_frame",
+    });
+  }
+  for (const referenceImageUrl of input.referenceImageUrls || []) {
+    content.push({
+      type: "image_url",
+      image_url: { url: referenceImageUrl },
       role: "reference_image",
     });
   }
@@ -1055,10 +1098,16 @@ async function createVideoTask(rawInput) {
     inputImageUrl: input.inputImageUrl,
     inputImageBytes: input.inputImageBytes,
     inputImageMime: input.inputImageMime,
+    lastFrameImagePath: input.lastFrameImagePath,
+    lastFrameImageUrl: input.lastFrameImageUrl,
+    lastFrameImageBytes: input.lastFrameImageBytes,
+    lastFrameImageMime: input.lastFrameImageMime,
     referenceImagePath: input.referenceImagePath,
+    referenceImagePaths: input.referenceImagePaths,
     referenceImageUrl: input.referenceImageUrl,
+    referenceImageUrls: input.referenceImageUrls,
     referenceImageBytes: input.referenceImageBytes,
-    referenceImageMime: input.referenceImageMime,
+    referenceImageMimes: input.referenceImageMimes,
     imageRole: input.imageRole,
     thumb: input.thumb,
     videoUrl: null,
@@ -1085,7 +1134,8 @@ function inputFromTask(task) {
   return {
     prompt: task.prompt,
     imageUrl: publicMediaUrl(task.inputImageUrl) || null,
-    referenceImageUrl: publicMediaUrl(task.referenceImageUrl) || null,
+    lastFrameImageUrl: publicMediaUrl(task.lastFrameImageUrl) || null,
+    referenceImageUrls: normalizeUrlList(task.referenceImageUrls || task.referenceImageUrl).map(publicMediaUrl),
     resolution: task.resolution,
     aspect: task.aspect,
     duration: task.duration,
@@ -1222,8 +1272,14 @@ async function handleDeleteTask(req, res, id) {
       try { rmSync(inputImagePath, { force: true }); } catch {}
     }
   }
-  if (task.referenceImagePath) {
-    const referenceImagePath = resolve(publicDataDir, task.referenceImagePath);
+  if (task.lastFrameImagePath) {
+    const lastFrameImagePath = resolve(publicDataDir, task.lastFrameImagePath);
+    if (lastFrameImagePath.startsWith(publicDataDir)) {
+      try { rmSync(lastFrameImagePath, { force: true }); } catch {}
+    }
+  }
+  for (const rawPath of normalizeUrlList(task.referenceImagePaths || task.referenceImagePath)) {
+    const referenceImagePath = resolve(publicDataDir, rawPath);
     if (referenceImagePath.startsWith(publicDataDir)) {
       try { rmSync(referenceImagePath, { force: true }); } catch {}
     }
@@ -1299,14 +1355,16 @@ function mcpTools() {
   return [
     {
       name: "create_video_task",
-      description: "Create a Studio/Seedance 2.0 Pro video task from text, an actual scene first frame, or an Ark reference image. Do not mix scene first-frame and reference-media inputs in one task. Character sheets, info graphs, turnarounds, and reference boards must be passed as reference_image_url, never as image_url. For best shot control, use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame as image_url.",
+      description: "Create a Studio/Seedance 2.0 Pro video task from text, actual first/last scene frames, or Ark reference image(s). Do not mix first/last-frame inputs with reference-media inputs in one task. Character sheets, info graphs, turnarounds, and reference boards must be passed as reference_image_url(s), never as image_url. For best shot control, use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame as image_url.",
       inputSchema: {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Video prompt for the real scene action. Do not describe a character sheet/info graph/reference board as the opening frame or first frame." },
-          image_url: { type: "string", description: "Optional actual scene first-frame image URL for image-to-video. Sent to Ark with role=first_frame. Never pass a character sheet, info graph, turnaround, or reference board here. Do not combine with reference_image_url; Ark rejects mixed first-frame and reference-media inputs." },
+          image_url: { type: "string", description: "Optional actual scene first-frame image URL for image-to-video. Sent to Ark with role=first_frame. Never pass a character sheet, info graph, turnaround, or reference board here. Do not combine with reference_image_url(s); Ark rejects mixed first/last-frame and reference-media inputs." },
+          last_frame_image_url: { type: "string", description: "Optional actual final scene frame image URL. Sent to Ark with role=last_frame. Requires image_url and cannot be combined with reference_image_url(s)." },
           image_role: { type: "string", enum: ["scene_first_frame", "character_reference"], description: "Role of image_url. Use scene_first_frame for an actual opening scene frame; use character_reference only when intentionally passing a character sheet/info graph as reference input." },
-          reference_image_url: { type: "string", description: "Optional character reference image URL. Sent to Ark as an image_url content item with role=reference_image, not as the first frame. Do not combine with image_url; use imagegen to bake the character into a scene frame when first-frame control is needed." },
+          reference_image_url: { type: "string", description: "Optional character reference image URL. Sent to Ark as an image_url content item with role=reference_image, not as the first frame. Do not combine with image_url/last_frame_image_url; use imagegen to bake the character into a scene frame when first-frame control is needed." },
+          reference_image_urls: { type: "array", items: { type: "string" }, description: "Optional multiple character reference image URLs. Each is sent with role=reference_image. Do not combine with first/last frame images." },
           image_id: { type: "string", description: "Optional reference image id." },
           thumb: { type: "string", description: "Optional preview thumbnail URL. Do not pass the character reference image as the thumbnail." },
           resolution: { type: "string", enum: ["720p", "1080p", "2K"], default: "1080p" },
@@ -1863,7 +1921,8 @@ const server = createServer(async (req, res) => {
       artifacts: [...tasks.values()].filter((task) => task.artifactUrl).length,
       covers: [...tasks.values()].filter((task) => task.coverUrl).length,
       input_images: [...tasks.values()].filter((task) => task.inputImagePath).length,
-      reference_images: [...tasks.values()].filter((task) => task.referenceImagePath).length,
+      last_frame_images: [...tasks.values()].filter((task) => task.lastFrameImagePath).length,
+      reference_images: [...tasks.values()].reduce((total, task) => total + normalizeUrlList(task.referenceImagePaths || task.referenceImagePath).length, 0),
     });
     return;
   }

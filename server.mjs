@@ -735,6 +735,13 @@ function normalizeGenerateInput(input) {
     rawReferenceImageUrl = rawReferenceImageUrl || rawImageUrl;
     rawImageUrl = null;
   }
+  if (rawImageUrl && rawReferenceImageUrl) {
+    throw httpError(400, "mixed_frame_and_reference_not_supported", [
+      "Ark video generation does not allow first/last frame content to be mixed with reference media content.",
+      "For controlled character video, first use imagegen with thinking to create a scene frame from the character reference, then call create_video_task with only that scene frame as image_url.",
+      "For Ark reference-guided generation, pass only reference_image_url and no image_url.",
+    ].join(" "));
+  }
   const persistedImage = persistInputImage(rawImageUrl);
   const persistedReferenceImage = persistInputImage(rawReferenceImageUrl);
   const imageUrl = persistedImage?.url || rawImageUrl;
@@ -1292,14 +1299,14 @@ function mcpTools() {
   return [
     {
       name: "create_video_task",
-      description: "Create a Studio/Seedance 2.0 Pro video task from text, an actual scene first frame, and/or an Ark reference image. Character sheets, info graphs, turnarounds, and reference boards must be passed as reference_image_url, never as image_url. For best shot control, use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame as image_url.",
+      description: "Create a Studio/Seedance 2.0 Pro video task from text, an actual scene first frame, or an Ark reference image. Do not mix scene first-frame and reference-media inputs in one task. Character sheets, info graphs, turnarounds, and reference boards must be passed as reference_image_url, never as image_url. For best shot control, use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame as image_url.",
       inputSchema: {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Video prompt for the real scene action. Do not describe a character sheet/info graph/reference board as the opening frame or first frame." },
-          image_url: { type: "string", description: "Optional actual scene first-frame image URL for image-to-video. Sent to Ark with role=first_frame. Never pass a character sheet, info graph, turnaround, or reference board here." },
+          image_url: { type: "string", description: "Optional actual scene first-frame image URL for image-to-video. Sent to Ark with role=first_frame. Never pass a character sheet, info graph, turnaround, or reference board here. Do not combine with reference_image_url; Ark rejects mixed first-frame and reference-media inputs." },
           image_role: { type: "string", enum: ["scene_first_frame", "character_reference"], description: "Role of image_url. Use scene_first_frame for an actual opening scene frame; use character_reference only when intentionally passing a character sheet/info graph as reference input." },
-          reference_image_url: { type: "string", description: "Optional character reference image URL. Sent to Ark as an image_url content item with role=reference_image, not as the first frame." },
+          reference_image_url: { type: "string", description: "Optional character reference image URL. Sent to Ark as an image_url content item with role=reference_image, not as the first frame. Do not combine with image_url; use imagegen to bake the character into a scene frame when first-frame control is needed." },
           image_id: { type: "string", description: "Optional reference image id." },
           thumb: { type: "string", description: "Optional preview thumbnail URL. Do not pass the character reference image as the thumbnail." },
           resolution: { type: "string", enum: ["720p", "1080p", "2K"], default: "1080p" },

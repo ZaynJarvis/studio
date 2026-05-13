@@ -32,7 +32,7 @@ For character-consistent video production, follow the `agentara/skills` AIGC cha
 1. Use `video-plan` to define timed scenes.
 2. Use `video-character-design` to create reusable character specs/sheets.
 3. Use `video-storyboard` to generate `storyboard/scene-XX.png` with imagegen with thinking, passing character sheets as visual references only.
-4. Use Studio/`create_video_task` for video generation. Pass the actual scene/storyboard frame as `image_url` so it is sent to Ark with `role=first_frame`. Pass character sheets, info graphs, turnarounds, or reference boards as `reference_image_url` so they are sent with `role=reference_image`, not as the first frame.
+4. Use Studio/`create_video_task` for video generation. Pass the actual scene/storyboard frame as `image_url` so it is sent to Ark with `role=first_frame`. Pass character sheets, info graphs, turnarounds, or reference boards as `reference_image_url` so they are sent with `role=reference_image`, not as the first frame. Do not combine `image_url` and `reference_image_url` in one video task; Ark rejects mixed first-frame and reference-media inputs.
 
 The video prompt should describe the real scene motion and camera behavior. It must not say that the character sheet/info graph/reference board is the opening frame or first frame.
 

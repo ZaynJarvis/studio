@@ -14,6 +14,12 @@ const HOST_PARAMS = {
   ],
 };
 
+const INPUT_MODES = [
+  { id: "text", label: "Text" },
+  { id: "frames", label: "Frames" },
+  { id: "references", label: "References" },
+];
+
 const ACTIVE_TASK_STATUSES = new Set([
   "created",
   "queued",
@@ -548,25 +554,78 @@ export function CreatePage() {
   const [camera, setCamera] = useState(tmpl ? tmpl.camera : "dynamic");
   const [seed, setSeed] = useState(() => (tmpl ? tmpl.seed : Math.floor(Math.random() * 99999)));
   const [image, setImage] = useState(imageFromRoute || null);
-  const mode = image ? "i2v" : "t2v";
+  const [lastFrame, setLastFrame] = useState(null);
+  const [referenceImages, setReferenceImages] = useState([]);
+  const [inputMode, setInputMode] = useState(() => imageFromRoute ? "frames" : tmpl?.mode === "ref2v" ? "references" : tmpl?.mode === "i2v" ? "frames" : "text");
+  const mode = inputMode === "frames" && image
+    ? "i2v"
+    : inputMode === "references" && referenceImages.length
+      ? "ref2v"
+      : "t2v";
 
   const [submitting, setSubmitting] = useState(false);
   const { show, node } = useToast();
 
+  const toStoredImage = (img) => {
+    if (img.id) return img;
+    return addImage({ name: img.name || "upload.png", src: img.src });
+  };
+
   const onPickFile = (img) => {
-    const item = img.id ? img : addImage({ name: img.name || "upload.png", src: img.src });
+    const item = toStoredImage(img);
     setImage(item);
+  };
+
+  const onPickLastFrame = (img) => {
+    const item = toStoredImage(img);
+    setLastFrame(item);
+  };
+
+  const onPickReference = (img) => {
+    const item = toStoredImage(img);
+    setReferenceImages((items) => items.some((x) => x.id === item.id || x.src === item.src) ? items : [...items, item].slice(0, 6));
+  };
+
+  const libraryStrip = (onSelect, selected = []) => {
+    const selectedIds = new Set(selected.filter(Boolean).map((img) => img.id || img.src));
+    const available = state.images.filter((img) => !selectedIds.has(img.id || img.src)).slice(0, 10);
+    if (!available.length) return null;
+    return (
+      <div style={{ marginTop: 14 }}>
+        <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", marginBottom: 8 }}>
+          Reuse from library
+        </div>
+        <div className="scroll-x" style={{ display: "flex", gap: 8, paddingBottom: 4 }}>
+          {available.map((img) => (
+            <button key={img.id}
+              onClick={() => onSelect(img)}
+              style={{
+                width: 64, height: 64, padding: 0,
+                border: "1px solid var(--line)", borderRadius: "var(--radius)",
+                background: "transparent", overflow: "hidden", flexShrink: 0,
+                cursor: "pointer",
+              }}>
+              <img src={img.src} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
   };
 
   const startGen = async () => {
     if (submitting) return;
     if (!prompt.trim()) { show("Write a prompt to generate"); return; }
+    if (inputMode === "frames" && lastFrame && !image) { show("Add a first frame before using a last frame"); return; }
+    if (inputMode === "references" && referenceImages.length === 0) { show("Add at least one reference image"); return; }
     setSubmitting(true);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90_000);
 
     try {
-      const imageSrc = image?.src;
+      const imageSrc = inputMode === "frames" ? image?.src : null;
+      const lastFrameSrc = inputMode === "frames" ? lastFrame?.src : null;
+      const referenceImageUrls = inputMode === "references" ? referenceImages.map((img) => img.src) : [];
       const task = await fetchJson("/api/generate", {
         method: "POST",
         signal: controller.signal,
@@ -575,7 +634,9 @@ export function CreatePage() {
           prompt,
           image_url: imageSrc,
           image_role: imageSrc ? "scene_first_frame" : undefined,
-          image_id: image?.id,
+          last_frame_image_url: lastFrameSrc,
+          reference_image_urls: referenceImageUrls.length ? referenceImageUrls : undefined,
+          image_id: inputMode === "frames" ? image?.id : undefined,
           model,
           resolution,
           aspect,
@@ -586,8 +647,10 @@ export function CreatePage() {
       });
       const v = addVideo(videoPatchFromTask(task, {
         id: task.id,
-        referenceImageUrl: image?.src || null,
-        imageId: image?.id,
+        referenceImageUrl: imageSrc || null,
+        lastFrameUrl: lastFrameSrc || null,
+        characterReferenceUrls: referenceImageUrls,
+        imageId: inputMode === "frames" ? image?.id : undefined,
       }));
       navigate("/preview", { id: v.id });
     } catch (error) {
@@ -623,29 +686,58 @@ export function CreatePage() {
       <div className="create-grid">
         <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
           <div>
-            <label className="label">
-              Scene first frame · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>optional — leave empty for text-to-video</em>
-            </label>
-            <DropZone onFile={onPickFile} image={image} onClear={() => setImage(null)} hint={"Drop an actual scene frame for I→V, or skip for T→V"} />
-            {state.images.length > 0 && !image && (
-              <div style={{ marginTop: 14 }}>
-                <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", marginBottom: 8 }}>
-                  Or reuse from library
+            <label className="label">Input mode</label>
+            <div className="seg" style={{ marginBottom: 16 }}>
+              {INPUT_MODES.map((option) => (
+                <button key={option.id}
+                  className={"seg-opt" + (inputMode === option.id ? " active" : "")}
+                  onClick={() => setInputMode(option.id)}>
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
+            {inputMode === "frames" && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 16 }}>
+                <div>
+                  <label className="label">
+                    First frame · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>actual opening scene</em>
+                  </label>
+                  <DropZone compact onFile={onPickFile} image={image} onClear={() => setImage(null)} hint={"Drop an actual first frame for I→V"} />
+                  {!image && libraryStrip(onPickFile, [image, lastFrame])}
                 </div>
-                <div className="scroll-x" style={{ display: "flex", gap: 8, paddingBottom: 4 }}>
-                  {state.images.slice(0, 8).map((img) => (
-                    <button key={img.id}
-                      onClick={() => setImage(img)}
-                      style={{
-                        width: 64, height: 64, padding: 0,
-                        border: "1px solid var(--line)", borderRadius: "var(--radius)",
-                        background: "transparent", overflow: "hidden", flexShrink: 0,
-                        cursor: "pointer",
-                      }}>
-                      <img src={img.src} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
-                    </button>
-                  ))}
+                <div>
+                  <label className="label">
+                    Last frame · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>optional final scene</em>
+                  </label>
+                  <DropZone compact onFile={onPickLastFrame} image={lastFrame} onClear={() => setLastFrame(null)} hint={"Drop an optional last frame"} />
+                  {!lastFrame && libraryStrip(onPickLastFrame, [image, lastFrame])}
                 </div>
+              </div>
+            )}
+
+            {inputMode === "references" && (
+              <div>
+                <label className="label">
+                  Reference images · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>identity and story references</em>
+                </label>
+                <DropZone compact onFile={onPickReference} image={null} hint={"Drop a character or story reference image"} />
+                {referenceImages.length > 0 && (
+                  <div className="scroll-x" style={{ display: "flex", gap: 10, marginTop: 12, paddingBottom: 4 }}>
+                    {referenceImages.map((img) => (
+                      <div key={img.id || img.src} className="img-tile" style={{ width: 92, height: 70, flexShrink: 0, position: "relative" }}>
+                        <img src={img.src} alt="" />
+                        <button className="btn btn-icon"
+                          onClick={() => setReferenceImages((items) => items.filter((item) => item !== img))}
+                          title="Remove reference"
+                          style={{ position: "absolute", top: 6, right: 6, width: 24, height: 24, minWidth: 24, background: "rgba(0,0,0,.68)", color: "#fff", borderColor: "transparent" }}>
+                          <Icon name="x" size={13}/>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {libraryStrip(onPickReference, referenceImages)}
               </div>
             )}
           </div>
@@ -657,8 +749,10 @@ export function CreatePage() {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder={mode === "i2v"
-                ? "Describe motion after this scene frame: 'camera pushes in slowly, steam curls, light flickers...'"
-                : "Describe the shot: subject, environment, motion, lens, mood, lighting..."}
+                ? "Describe motion between the frame endpoints: 'camera pushes in slowly, light flickers...'"
+                : mode === "ref2v"
+                  ? "Describe the shot while using references for identity, wardrobe, props, or story beats..."
+                  : "Describe the shot: subject, environment, motion, lens, mood, lighting..."}
               style={{ minHeight: 140 }}
             />
             <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".1em", marginTop: 6, display: "flex", justifyContent: "space-between" }}>
@@ -670,8 +764,8 @@ export function CreatePage() {
 
         <aside style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div className="chip" style={{ alignSelf: "flex-start" }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: image ? "var(--accent-2)" : "var(--fg-3)", display: "inline-block" }}/>
-            {image ? "Scene frame → Video" : "Text → Video"} · auto
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: mode === "t2v" ? "var(--fg-3)" : "var(--accent-2)", display: "inline-block" }}/>
+            {modeLabel(mode)} · {inputMode}
           </div>
 
           <ParamRow label="Model">
@@ -1054,18 +1148,49 @@ export function PreviewPage() {
               ["created", fmtDate(v.createdAt) + " · " + relTime(v.createdAt)],
             ]}/>
           </div>
-          {(v.imageId || v.referenceImageUrl || v.characterReferenceUrl) && (() => {
+          {(() => {
             const ref = state.images.find((i) => i.id === v.imageId);
-            const refSrc = ref?.src || v.referenceImageUrl || v.characterReferenceUrl;
-            if (!refSrc) return null;
+            const sceneFrameSrc = v.mode === "ref2v" ? null : ref?.src || v.referenceImageUrl;
+            const referenceUrls = Array.from(new Set([
+              ...(Array.isArray(v.characterReferenceUrls) ? v.characterReferenceUrls : []),
+              v.characterReferenceUrl,
+            ].filter(Boolean)));
+            if (!sceneFrameSrc && !v.lastFrameUrl && referenceUrls.length === 0) return null;
             return (
-              <div>
-                <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>
-                  {v.mode === "ref2v" ? "Character reference" : "Scene frame"}
-                </div>
-                <div className="img-tile" style={{ aspectRatio: "16/9", height: 140 }}>
-                  <img src={refSrc} alt=""/>
-                </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {(sceneFrameSrc || v.lastFrameUrl) && (
+                  <div>
+                    <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>
+                      Scene frames
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10 }}>
+                      {sceneFrameSrc && (
+                        <div className="img-tile" style={{ aspectRatio: "16/9" }}>
+                          <img src={sceneFrameSrc} alt=""/>
+                        </div>
+                      )}
+                      {v.lastFrameUrl && (
+                        <div className="img-tile" style={{ aspectRatio: "16/9" }}>
+                          <img src={v.lastFrameUrl} alt=""/>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {referenceUrls.length > 0 && (
+                  <div>
+                    <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>
+                      Reference images
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(82px,1fr))", gap: 8 }}>
+                      {referenceUrls.map((src, index) => (
+                        <div key={`${src}-${index}`} className="img-tile" style={{ aspectRatio: "4/3" }}>
+                          <img src={src} alt=""/>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })()}

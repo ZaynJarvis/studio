@@ -63,7 +63,7 @@ async function prepareUploadImage(file) {
   return canvas.toDataURL("image/jpeg", 0.88);
 }
 
-export function DropZone({ onFile, image, onClear, hint = "Drop image, or click to browse", accept = "image/*" }) {
+export function DropZone({ onFile, image, onClear, hint = "Drop image, or click to browse", accept = "image/*", compact = false }) {
   const [over, setOver] = useState(false);
   const inputRef = useRef(null);
   const handle = async (files) => {
@@ -88,10 +88,12 @@ export function DropZone({ onFile, image, onClear, hint = "Drop image, or click 
         if (data) { try { onFile(JSON.parse(data)); return; } catch { return; } }
         handle(e.dataTransfer.files);
       }}
-      style={image ? { padding: 0, minHeight: 280, border: "1px solid var(--line-strong)" } : undefined}
+      style={image
+        ? { padding: 0, minHeight: compact ? 172 : 280, border: "1px solid var(--line-strong)" }
+        : compact ? { minHeight: 172, padding: 22 } : undefined}
     >
       {image ? (
-        <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 280 }}>
+        <div style={{ position: "relative", width: "100%", height: "100%", minHeight: compact ? 172 : 280 }}>
           <img src={image.src} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", borderRadius: "inherit" }} />
           <button
             className="btn btn-icon"

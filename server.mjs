@@ -799,7 +799,11 @@ function toArkBody(input, localTaskId) {
   const content = [{ type: "text", text }];
 
   if (input.imageUrl) {
-    content.push({ type: "image_url", image_url: { url: input.imageUrl } });
+    content.push({
+      type: "image_url",
+      image_url: { url: input.imageUrl },
+      role: "first_frame",
+    });
   }
   if (input.referenceImageUrl) {
     content.push({
@@ -1293,7 +1297,7 @@ function mcpTools() {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Video prompt for the real scene action. Do not describe a character sheet/info graph/reference board as the opening frame or first frame." },
-          image_url: { type: "string", description: "Optional actual scene first-frame image URL for image-to-video. Seedance treats this as the first video frame. Never pass a character sheet, info graph, turnaround, or reference board here." },
+          image_url: { type: "string", description: "Optional actual scene first-frame image URL for image-to-video. Sent to Ark with role=first_frame. Never pass a character sheet, info graph, turnaround, or reference board here." },
           image_role: { type: "string", enum: ["scene_first_frame", "character_reference"], description: "Role of image_url. Use scene_first_frame for an actual opening scene frame; use character_reference only when intentionally passing a character sheet/info graph as reference input." },
           reference_image_url: { type: "string", description: "Optional character reference image URL. Sent to Ark as an image_url content item with role=reference_image, not as the first frame." },
           image_id: { type: "string", description: "Optional reference image id." },

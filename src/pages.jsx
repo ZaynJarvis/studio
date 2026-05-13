@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useEffect } from 'react';
+import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { Icon, DropZone, VideoPlayer, GenerationProgress, useToast } from './components';
 import { useStore, useHashRoute, relTime, fmtDate } from './store';
 import { authHeader, clearToken, getToken } from './auth';
@@ -128,6 +128,84 @@ async function deleteRemoteTask(v) {
       throw error;
     }
   }
+}
+
+function isAppleTouchDevice() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  const platform = navigator.platform || "";
+  return /iP(hone|ad|od)/.test(ua)
+    || /iP(hone|ad|od)/.test(platform)
+    || (platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function canAttemptFileShare() {
+  return typeof navigator !== "undefined"
+    && typeof navigator.share === "function"
+    && typeof navigator.canShare === "function"
+    && typeof File === "function";
+}
+
+function canShareVideoFile(file) {
+  if (!canAttemptFileShare()) return false;
+  try {
+    return navigator.canShare({ files: [file] });
+  } catch {
+    return false;
+  }
+}
+
+function videoExtensionFromSrc(src) {
+  try {
+    const ext = new URL(src, window.location.href).pathname.match(/\.(mp4|m4v|mov|webm)$/i)?.[0];
+    if (ext) return ext.toLowerCase();
+  } catch {
+    // Use the default below when the URL cannot be parsed.
+  }
+  return ".mp4";
+}
+
+function videoMimeFromExtension(ext) {
+  if (ext === ".mov") return "video/quicktime";
+  if (ext === ".webm") return "video/webm";
+  return "video/mp4";
+}
+
+function videoFileName(v) {
+  const fallback = String(v?.taskId || v?.id || "videogen-render").slice(0, 24) || "videogen-render";
+  const base = String(v?.title || fallback)
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase() || fallback;
+  return `${base}${videoExtensionFromSrc(v?.src || "")}`;
+}
+
+async function fetchVideoFile(src, filename) {
+  if (typeof File !== "function") {
+    throw new Error("This browser cannot prepare videos for sharing.");
+  }
+
+  const res = await fetch(src, { credentials: "same-origin", cache: "force-cache" });
+  if (!res.ok) {
+    throw new Error(`Video download failed with HTTP ${res.status}`);
+  }
+
+  const blob = await res.blob();
+  const ext = videoExtensionFromSrc(filename);
+  const type = blob.type || videoMimeFromExtension(ext);
+  return new File([blob], filename, { type, lastModified: Date.now() });
+}
+
+function downloadVideoLink(src, filename) {
+  const a = document.createElement("a");
+  a.href = src;
+  a.download = filename;
+  a.target = "_blank";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 export function ServerTaskSync() {
@@ -728,10 +806,79 @@ export function PreviewPage() {
   const shouldPoll = taskId && (!v || v.taskId || isActiveTask(v.status));
   const videoRef = useRef(v);
   const [taskError, setTaskError] = useState(null);
+  const shareFileRef = useRef(null);
+  const shareFilePromiseRef = useRef(null);
+  const [iosShareStatus, setIosShareStatus] = useState("idle");
+  const videoId = v?.id;
+  const videoTaskId = v?.taskId;
+  const videoSrc = v?.src;
+  const videoTitle = v?.title;
+  const shareVideo = useMemo(() => videoSrc ? {
+    id: videoId,
+    taskId: videoTaskId,
+    src: videoSrc,
+    title: videoTitle,
+  } : null, [videoId, videoTaskId, videoSrc, videoTitle]);
 
   useEffect(() => {
     videoRef.current = v;
   }, [v]);
+
+  const beginIosShareFileLoad = useCallback((video) => {
+    if (!video?.src) return Promise.reject(new Error("Video is not ready yet"));
+    const filename = videoFileName(video);
+    const cached = shareFileRef.current;
+    if (cached?.src === video.src && cached.filename === filename) {
+      setIosShareStatus(canShareVideoFile(cached.file) ? "ready" : "unavailable");
+      return Promise.resolve(cached.file);
+    }
+
+    const pending = shareFilePromiseRef.current;
+    if (pending?.src === video.src && pending.filename === filename) {
+      return pending.promise;
+    }
+
+    setIosShareStatus("preparing");
+    let entry = null;
+    const promise = fetchVideoFile(video.src, filename)
+      .then((file) => {
+        shareFileRef.current = { src: video.src, filename, file };
+        setIosShareStatus(canShareVideoFile(file) ? "ready" : "unavailable");
+        return file;
+      })
+      .catch((error) => {
+        setIosShareStatus("unavailable");
+        throw error;
+      })
+      .finally(() => {
+        if (shareFilePromiseRef.current === entry) {
+          shareFilePromiseRef.current = null;
+        }
+      });
+
+    entry = { src: video.src, filename, promise };
+    shareFilePromiseRef.current = entry;
+    promise.catch(() => {});
+    return promise;
+  }, []);
+
+  useEffect(() => {
+    shareFileRef.current = null;
+    shareFilePromiseRef.current = null;
+  }, [videoSrc]);
+
+  useEffect(() => {
+    if (!shareVideo?.src || !isAppleTouchDevice() || !canAttemptFileShare()) return undefined;
+    let cancelled = false;
+    beginIosShareFileLoad(shareVideo)
+      .then((file) => {
+        if (!cancelled) setIosShareStatus(canShareVideoFile(file) ? "ready" : "unavailable");
+      })
+      .catch(() => {
+        if (!cancelled) setIosShareStatus("unavailable");
+      });
+    return () => { cancelled = true; };
+  }, [shareVideo, beginIosShareFileLoad]);
 
   useEffect(() => {
     if (!shouldPoll) return undefined;
@@ -787,16 +934,39 @@ export function PreviewPage() {
     </div>
   );
 
-  const onDownload = () => {
+  const onDownload = async () => {
     if (!v.src) {
       show("Video is not ready yet");
       return;
     }
-    const a = document.createElement("a");
-    a.href = v.src;
-    a.download = `${v.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.mp4`;
-    a.target = "_blank";
-    a.click();
+    if (isAppleTouchDevice() && canAttemptFileShare()) {
+      try {
+        const file = await beginIosShareFileLoad(v);
+        if (canShareVideoFile(file)) {
+          show("Choose Save Video to add it to Photos");
+          await navigator.share({
+            files: [file],
+            title: v.title || "Videogen render",
+          });
+          show("Share completed");
+          return;
+        }
+        show("This video format cannot be shared to Photos here");
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          show("Share cancelled");
+          return;
+        }
+        const cached = shareFileRef.current;
+        if (error?.name === "NotAllowedError" && cached?.src === v.src) {
+          show("Video prepared. Tap Save to Photos again.");
+          return;
+        }
+        console.warn("iOS video share failed", error);
+        show("Opening normal download");
+      }
+    }
+    downloadVideoLink(v.src, videoFileName(v));
     show("Download started");
   };
   const onDelete = async () => {
@@ -831,7 +1001,9 @@ export function PreviewPage() {
         <div className="preview-actions">
           <button className="btn" onClick={onCopyLink}><Icon name="copy" size={14}/> Copy link</button>
           <button className="btn" onClick={onTemplate}><Icon name="copy" size={14}/> Use as template</button>
-          <button className="btn" onClick={onDownload} disabled={!v.src}><Icon name="download" size={14}/> Download</button>
+          <button className="btn" onClick={onDownload} disabled={!v.src}>
+            <Icon name="download" size={14}/> {isAppleTouchDevice() ? (iosShareStatus === "preparing" ? "Preparing" : "Save to Photos") : "Download"}
+          </button>
           <button className="btn" onClick={onDelete} title="Delete"><Icon name="trash" size={14}/></button>
         </div>
       </header>

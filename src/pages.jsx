@@ -343,7 +343,7 @@ function SectionHeader({ title, sub, count }) {
   );
 }
 
-function VideoCard({ v, onClick, onTemplate }) {
+function VideoCard({ v, onClick, onTemplate, onDelete }) {
   const active = isActiveTask(v.status);
   const badge = taskBadgeText(v);
 
@@ -373,6 +373,13 @@ function VideoCard({ v, onClick, onTemplate }) {
             onClick={(e) => { e.stopPropagation(); onTemplate(); }}>
             <Icon name="copy" size={11}/> Use as template
           </button>
+          {onDelete && (
+            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "5px 9px" }}
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              title="Delete">
+              <Icon name="trash" size={11}/> Delete
+            </button>
+          )}
         </div>
       </div>
     </article>
@@ -395,7 +402,7 @@ function PendingEmptyState({ onCreate }) {
   );
 }
 
-function PendingTaskList({ videos, navigate, onTemplate }) {
+function PendingTaskList({ videos, navigate, onTemplate, onDelete }) {
   const activeVideos = videos.filter((v) => isActiveTask(v.status));
 
   return (
@@ -415,6 +422,7 @@ function PendingTaskList({ videos, navigate, onTemplate }) {
               v={v}
               onClick={() => navigate("/preview", { id: v.id })}
               onTemplate={() => onTemplate(v)}
+              onDelete={() => onDelete(v)}
             />
           ))}
         </div>
@@ -426,8 +434,9 @@ function PendingTaskList({ videos, navigate, onTemplate }) {
 }
 
 export function HomePage() {
-  const { state } = useStore();
+  const { state, removeVideo } = useStore();
   const { navigate } = useHashRoute();
+  const { show, node } = useToast();
   const videos = useMemo(() => [...state.videos].sort(taskSort), [state.videos]);
   const activeVideos = videos.filter((v) => isActiveTask(v.status));
   const readyVideos = videos.filter((v) => !isActiveTask(v.status));
@@ -436,8 +445,19 @@ export function HomePage() {
     navigate("/create", { from: v.id });
   };
 
+  const deleteVideo = async (v) => {
+    try {
+      await deleteRemoteTask(v);
+      removeVideo(v.id);
+      show("Video removed");
+    } catch (error) {
+      show(error.message || "Failed to delete task");
+    }
+  };
+
   return (
     <div>
+      {node}
       <section className="home-hero">
         <div className="mono" style={{ fontSize: 10, letterSpacing: ".24em", color: "var(--accent)", textTransform: "uppercase", marginBottom: 22, display: "flex", alignItems: "center", gap: 10 }}>
           <span>REEL 14/26</span>
@@ -470,14 +490,22 @@ export function HomePage() {
       </section>
 
       <section className="page-section compact">
-        <PendingTaskList videos={videos} navigate={navigate} onTemplate={applyTemplate} />
+        <PendingTaskList videos={videos} navigate={navigate} onTemplate={applyTemplate} onDelete={deleteVideo} />
       </section>
 
       <section className="page-section">
         <SectionHeader title="Dailies" sub="recent finished takes · click to revisit · grab as template" count={readyVideos.length} />
         {readyVideos.length > 0 ? (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
-            {readyVideos.map((v) => <VideoCard key={v.id} v={v} onClick={() => navigate("/preview", { id: v.id })} onTemplate={() => applyTemplate(v)} />)}
+            {readyVideos.map((v) => (
+              <VideoCard
+                key={v.id}
+                v={v}
+                onClick={() => navigate("/preview", { id: v.id })}
+                onTemplate={() => applyTemplate(v)}
+                onDelete={() => deleteVideo(v)}
+              />
+            ))}
           </div>
         ) : (
           <div className="queue-empty">

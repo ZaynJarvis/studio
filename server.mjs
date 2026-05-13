@@ -43,13 +43,19 @@ const webAccessToken = process.env.MCP_TOKEN || "";
 const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
 const maxJsonBodyBytes = Number(process.env.MAX_JSON_BODY_BYTES || Math.ceil(maxImageBytes * 1.5) + 1024 * 1024);
 const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1024);
+const shutdownGraceMs = clampInt(process.env.SHUTDOWN_GRACE_MS, 1_000, 60_000, 20_000);
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]);
 const pollTimers = new Map();
+const backgroundTimers = new Set();
+const backgroundJobs = new Set();
+const shutdownControllers = new Set();
+const activeSockets = new Set();
 const pollInflight = new Set();
 const submissionInflight = new Set();
 const artifactInflight = new Set();
 const coverInflight = new Set();
+let isShuttingDown = false;
 
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(artifactsDir, { recursive: true });
@@ -234,7 +240,7 @@ function extractResponseText(raw) {
   return texts.join("\n").trim();
 }
 
-async function generateTaskTitle(input) {
+async function generateTaskTitle(input, signal = undefined) {
   const fallback = titleFromPrompt(input.prompt);
   if (!arkTitleModel) return fallback;
 
@@ -253,6 +259,8 @@ async function generateTaskTitle(input) {
   });
 
   const controller = new AbortController();
+  const abortTitle = () => controller.abort();
+  signal?.addEventListener("abort", abortTitle, { once: true });
   const timeout = setTimeout(() => controller.abort(), arkTitleTimeoutMs);
   timeout.unref?.();
 
@@ -271,6 +279,7 @@ async function generateTaskTitle(input) {
     return fallback;
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortTitle);
   }
 }
 
@@ -442,36 +451,40 @@ function artifactExtension(sourceUrl, contentType) {
 
 function scheduleArtifactCache(id, reason = "task") {
   const task = tasks.get(id);
+  if (isShuttingDown) return;
   if (!task || task.status !== "succeeded" || task.artifactUrl || artifactInflight.has(id)) return;
   if (!(task.sourceVideoUrl || task.videoUrl)) return;
 
-  setTimeout(() => {
-    cacheTaskArtifact(id, reason).catch((error) => {
+  scheduleBackgroundTimer(() => {
+    trackBackgroundJob(cacheTaskArtifact(id, reason).catch((error) => {
       console.error(`artifact cache failed ${id}`, publicError(error));
-    });
-  }, 0).unref?.();
+    }));
+  }, 0);
 }
 
 function scheduleCoverGeneration(id, reason = "task") {
   const task = tasks.get(id);
+  if (isShuttingDown) return;
   if (!task || task.status !== "succeeded" || task.coverUrl || coverInflight.has(id)) return;
   if (!task.artifactPath) return;
 
-  setTimeout(() => {
-    generateTaskCover(id, reason).catch((error) => {
+  scheduleBackgroundTimer(() => {
+    trackBackgroundJob(generateTaskCover(id, reason).catch((error) => {
       console.error(`cover generation failed ${id}`, publicError(error));
-    });
-  }, 0).unref?.();
+    }));
+  }, 0);
 }
 
 async function cacheTaskArtifact(id, reason = "task") {
   const task = tasks.get(id);
+  if (isShuttingDown) return;
   if (!task || task.status !== "succeeded" || task.artifactUrl || artifactInflight.has(id)) return;
 
   const sourceUrl = task.sourceVideoUrl || task.videoUrl;
   if (!sourceUrl || sourceUrl.startsWith("/media/")) return;
 
   artifactInflight.add(id);
+  const { controller, release } = createShutdownController();
   let tmpPath = null;
 
   try {
@@ -480,7 +493,7 @@ async function cacheTaskArtifact(id, reason = "task") {
     task.updatedAt = Date.now();
     saveTasks();
 
-    const res = await fetch(sourceUrl);
+    const res = await fetch(sourceUrl, { signal: controller.signal });
     if (!res.ok || !res.body) {
       throw httpError(res.status || 502, "artifact_fetch_failed", `Could not fetch generated video for storage.`);
     }
@@ -507,7 +520,7 @@ async function cacheTaskArtifact(id, reason = "task") {
       },
     });
 
-    await pipeline(Readable.fromWeb(res.body), counter, createWriteStream(tmpPath));
+    await pipeline(Readable.fromWeb(res.body), counter, createWriteStream(tmpPath), { signal: controller.signal });
     renameSync(tmpPath, finalPath);
     tmpPath = null;
 
@@ -525,24 +538,34 @@ async function cacheTaskArtifact(id, reason = "task") {
     if (tmpPath) {
       try { rmSync(tmpPath, { force: true }); } catch {}
     }
+    if (isShutdownAbort(error)) {
+      task.artifactStatus = null;
+      task.artifactError = null;
+      task.updatedAt = Date.now();
+      saveTasks();
+      return;
+    }
     task.artifactStatus = "failed";
     task.artifactError = publicError(error);
     task.updatedAt = Date.now();
     saveTasks();
     throw error;
   } finally {
+    release();
     artifactInflight.delete(id);
   }
 }
 
 async function generateTaskCover(id, reason = "task") {
   const task = tasks.get(id);
+  if (isShuttingDown) return;
   if (!task || task.status !== "succeeded" || task.coverUrl || coverInflight.has(id)) return;
 
   const artifactPath = task.artifactPath ? resolve(publicDataDir, task.artifactPath) : null;
   if (!artifactPath || !artifactPath.startsWith(publicDataDir) || !existsSync(artifactPath)) return;
 
   coverInflight.add(id);
+  const { controller, release } = createShutdownController();
   let tmpPath = null;
 
   try {
@@ -575,7 +598,7 @@ async function generateTaskCover(id, reason = "task") {
         "-f",
         "image2",
         tmpPath,
-      ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
+      ], { timeout: 30_000, maxBuffer: 1024 * 1024, signal: controller.signal });
       renameSync(tmpPath, finalPath);
       tmpPath = null;
     }
@@ -595,12 +618,20 @@ async function generateTaskCover(id, reason = "task") {
     if (tmpPath) {
       try { rmSync(tmpPath, { force: true }); } catch {}
     }
+    if (isShutdownAbort(error)) {
+      task.coverStatus = null;
+      task.coverError = null;
+      task.updatedAt = Date.now();
+      saveTasks();
+      return;
+    }
     task.coverStatus = "failed";
     task.coverError = publicError(error);
     task.updatedAt = Date.now();
     saveTasks();
     throw error;
   } finally {
+    release();
     coverInflight.delete(id);
   }
 }
@@ -690,11 +721,12 @@ function toArkBody(input, localTaskId) {
   return body;
 }
 
-async function createArkTask(input, localTaskId = randomUUID()) {
+async function createArkTask(input, localTaskId = randomUUID(), signal = undefined) {
   const body = toArkBody(input, localTaskId);
   const result = await arkFetch("/contents/generations/tasks", {
     method: "POST",
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!result.id) {
@@ -704,8 +736,8 @@ async function createArkTask(input, localTaskId = randomUUID()) {
   return { localTaskId, arkTaskId: result.id };
 }
 
-async function getArkTask(taskId) {
-  return arkFetch(`/contents/generations/tasks/${encodeURIComponent(taskId)}`);
+async function getArkTask(taskId, signal = undefined) {
+  return arkFetch(`/contents/generations/tasks/${encodeURIComponent(taskId)}`, { signal });
 }
 
 async function arkFetch(path, options = {}) {
@@ -799,12 +831,14 @@ function applyArkResult(task, raw) {
 
 async function pollTask(id, reason = "timer") {
   if (monitorMode !== "poll") return;
+  if (isShuttingDown) return;
   const task = tasks.get(id);
   if (!task || terminalStatuses.has(task.status) || pollInflight.has(id)) return;
 
   pollInflight.add(id);
+  const { controller, release } = createShutdownController();
   try {
-    const raw = await getArkTask(task.arkTaskId);
+    const raw = await getArkTask(task.arkTaskId, controller.signal);
     applyArkResult(task, raw);
     task.lastPolledAt = Date.now();
     task.lastPollError = null;
@@ -818,6 +852,8 @@ async function pollTask(id, reason = "timer") {
       schedulePoll(id, pollDelay(task));
     }
   } catch (error) {
+    if (isShutdownAbort(error)) return;
+
     task.updatedAt = Date.now();
     task.lastPolledAt = Date.now();
     task.lastPollError = publicError(error);
@@ -834,6 +870,7 @@ async function pollTask(id, reason = "timer") {
       schedulePoll(id, Math.min(60_000, 5_000 * task.pollErrorCount));
     }
   } finally {
+    release();
     pollInflight.delete(id);
     console.log(`task poll ${reason}: ${id} -> ${tasks.get(id)?.status || "missing"}`);
   }
@@ -848,10 +885,14 @@ function pollDelay(task) {
 
 function schedulePoll(id, delayMs) {
   const task = tasks.get(id);
+  if (isShuttingDown) return;
   if (!task || terminalStatuses.has(task.status) || pollTimers.has(id)) return;
   const timer = setTimeout(() => {
     pollTimers.delete(id);
-    pollTask(id);
+    if (isShuttingDown) return;
+    trackBackgroundJob(pollTask(id).catch((error) => {
+      console.error(`task poll failed ${id}`, publicError(error));
+    }));
   }, delayMs);
   timer.unref?.();
   pollTimers.set(id, timer);
@@ -863,6 +904,10 @@ async function handleGenerate(req, res) {
 }
 
 async function createVideoTask(rawInput) {
+  if (isShuttingDown) {
+    throw httpError(503, "server_shutting_down", "Server is shutting down. Retry on the next deployment.");
+  }
+
   const input = normalizeGenerateInput(rawInput);
   const localTaskId = randomUUID();
   const now = Date.now();
@@ -923,18 +968,18 @@ function inputFromTask(task) {
 
 function scheduleArkSubmit(id, delayMs = 0) {
   const task = tasks.get(id);
+  if (isShuttingDown) return;
   if (!task || task.arkTaskId || terminalStatuses.has(task.status) || submissionInflight.has(id)) return;
 
-  const timer = setTimeout(() => {
-    submitArkTask(id).catch((error) => {
+  scheduleBackgroundTimer(() => {
+    trackBackgroundJob(submitArkTask(id).catch((error) => {
       console.error(`task submit failed ${id}`, publicError(error));
-    });
+    }));
   }, delayMs);
-  timer.unref?.();
 }
 
-async function updateTaskTitle(id, input) {
-  const title = await generateTaskTitle(input);
+async function updateTaskTitle(id, input, signal = undefined) {
+  const title = await generateTaskTitle(input, signal);
   const task = tasks.get(id);
   if (!task || task.title === title) return;
 
@@ -944,10 +989,12 @@ async function updateTaskTitle(id, input) {
 }
 
 async function submitArkTask(id) {
+  if (isShuttingDown) return;
   const task = tasks.get(id);
   if (!task || task.arkTaskId || terminalStatuses.has(task.status) || submissionInflight.has(id)) return;
 
   submissionInflight.add(id);
+  const { controller, release } = createShutdownController();
   try {
     task.submissionStatus = "submitting";
     task.lastSubmitError = null;
@@ -955,11 +1002,11 @@ async function submitArkTask(id) {
     saveTasks();
 
     const input = inputFromTask(task);
-    updateTaskTitle(id, input).catch((error) => {
+    updateTaskTitle(id, input, controller.signal).catch((error) => {
       console.warn(`title update failed ${id}`, publicError(error));
     });
 
-    const { arkTaskId } = await createArkTask(input, id);
+    const { arkTaskId } = await createArkTask(input, id, controller.signal);
     const latest = tasks.get(id);
     if (!latest) return;
 
@@ -977,6 +1024,17 @@ async function submitArkTask(id) {
     console.log(`task submit: ${id} -> ${arkTaskId}`);
   } catch (error) {
     const failed = tasks.get(id);
+    if (isShutdownAbort(error)) {
+      if (failed) {
+        failed.submissionStatus = "pending";
+        failed.lastSubmitError = null;
+        failed.updatedAt = Date.now();
+        tasks.set(id, failed);
+        saveTasks();
+      }
+      return;
+    }
+
     if (failed) {
       failed.status = "failed";
       failed.error = publicError(error);
@@ -989,6 +1047,7 @@ async function submitArkTask(id) {
     }
     throw error;
   } finally {
+    release();
     submissionInflight.delete(id);
   }
 }
@@ -1532,8 +1591,127 @@ function sendFile(req, res, filePath, cacheControl) {
   createReadStream(filePath).pipe(res);
 }
 
-createServer(async (req, res) => {
+function scheduleBackgroundTimer(callback, delayMs) {
+  if (isShuttingDown) return null;
+  const timer = setTimeout(() => {
+    backgroundTimers.delete(timer);
+    if (!isShuttingDown) callback();
+  }, delayMs);
+  timer.unref?.();
+  backgroundTimers.add(timer);
+  return timer;
+}
+
+function trackBackgroundJob(promise) {
+  const tracked = Promise.resolve(promise).finally(() => {
+    backgroundJobs.delete(tracked);
+  });
+  backgroundJobs.add(tracked);
+  return tracked;
+}
+
+function createShutdownController() {
+  const controller = new AbortController();
+  shutdownControllers.add(controller);
+  return {
+    controller,
+    release: () => shutdownControllers.delete(controller),
+  };
+}
+
+function isShutdownAbort(error) {
+  return isShuttingDown && (error?.name === "AbortError" || error?.code === "ABORT_ERR");
+}
+
+function clearScheduledWork() {
+  for (const timer of pollTimers.values()) {
+    clearTimeout(timer);
+  }
+  pollTimers.clear();
+
+  for (const timer of backgroundTimers) {
+    clearTimeout(timer);
+  }
+  backgroundTimers.clear();
+}
+
+function wait(ms) {
+  return new Promise((resolveWait) => setTimeout(resolveWait, ms));
+}
+
+function closeServer(server) {
+  return new Promise((resolveClose) => {
+    server.close((error) => {
+      if (error) {
+        console.error("server close failed", publicError(error));
+      }
+      resolveClose();
+    });
+  });
+}
+
+async function shutdown(signal) {
+  if (isShuttingDown) {
+    console.warn(`received ${signal} while shutdown is already in progress; forcing open connections closed`);
+    server.closeAllConnections?.();
+    for (const socket of activeSockets) {
+      socket.destroy();
+    }
+    return;
+  }
+
+  isShuttingDown = true;
+  console.log(`received ${signal}; starting graceful shutdown with ${shutdownGraceMs}ms grace`);
+
+  clearScheduledWork();
+  for (const controller of shutdownControllers) {
+    controller.abort();
+  }
+
+  try {
+    saveTasks();
+  } catch (error) {
+    console.error("failed to save tasks during shutdown", publicError(error));
+  }
+
+  server.closeIdleConnections?.();
+
+  const forceCloseTimer = setTimeout(() => {
+    console.warn(`shutdown grace exceeded; forcing ${activeSockets.size} open connection(s) closed`);
+    server.closeAllConnections?.();
+    for (const socket of activeSockets) {
+      socket.destroy();
+    }
+  }, shutdownGraceMs);
+
+  await Promise.race([
+    Promise.allSettled([
+      closeServer(server),
+      Promise.allSettled([...backgroundJobs]),
+    ]),
+    wait(shutdownGraceMs),
+  ]);
+
+  clearTimeout(forceCloseTimer);
+
+  try {
+    saveTasks();
+  } catch (error) {
+    console.error("failed to save tasks after shutdown", publicError(error));
+  }
+
+  console.log("graceful shutdown complete");
+  process.exit(0);
+}
+
+const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+  if (isShuttingDown) {
+    res.setHeader("connection", "close");
+    sendJson(res, 503, { error: { code: "server_shutting_down", message: "Server is shutting down." } });
+    return;
+  }
 
   if (url.pathname === "/healthz") {
     sendJson(res, 200, {
@@ -1589,9 +1767,32 @@ createServer(async (req, res) => {
 
   const ext = extname(filePath);
   sendFile(req, res, filePath, ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable");
-}).listen(port, "0.0.0.0", () => {
+});
+
+server.on("connection", (socket) => {
+  activeSockets.add(socket);
+  socket.on("close", () => {
+    activeSockets.delete(socket);
+  });
+});
+
+server.listen(port, "0.0.0.0", () => {
   console.log(`videogen listening on :${port}`);
   console.log(`task store: ${tasksFile}`);
   console.log(`artifact store: ${artifactsDir}`);
   console.log(`task monitor mode: ${monitorMode}`);
+});
+
+process.on("SIGTERM", () => {
+  shutdown("SIGTERM").catch((error) => {
+    console.error("graceful shutdown failed", publicError(error));
+    process.exit(1);
+  });
+});
+
+process.on("SIGINT", () => {
+  shutdown("SIGINT").catch((error) => {
+    console.error("graceful shutdown failed", publicError(error));
+    process.exit(1);
+  });
 });

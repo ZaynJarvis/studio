@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { extname, join, normalize, resolve } from "node:path";
+import { basename, extname, join, normalize, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Readable, Transform } from "node:stream";
@@ -415,11 +415,25 @@ function publicTaskThumbUrl(task) {
   return publicThumbUrl(raw);
 }
 
-function publicMediaUrl(path) {
+function publicMediaUrl(path, baseUrl = publicBaseUrl) {
   if (!path) return null;
   if (String(path).startsWith("http://") || String(path).startsWith("https://")) return path;
-  if (!publicBaseUrl) return path;
-  return new URL(path, publicBaseUrl).toString();
+  if (!baseUrl) return path;
+  return new URL(path, baseUrl).toString();
+}
+
+function requestPublicBaseUrl(req) {
+  const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim();
+  if (!host) return "";
+
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const proto = forwardedProto || (/^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(host) ? "http" : "https");
+  try {
+    return new URL(`${proto}://${host}`).origin;
+  } catch {
+    return "";
+  }
 }
 
 function publicText(value, max = 4000) {
@@ -486,7 +500,7 @@ function sanitizeFilePart(value) {
     .slice(0, 120) || randomUUID();
 }
 
-function decodeDataImageUrl(value) {
+function decodeDataImageUrl(value, label = "Image") {
   const match = String(value || "").match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([a-zA-Z0-9+/=\s]+)$/i);
   if (!match) return null;
 
@@ -496,24 +510,25 @@ function decodeDataImageUrl(value) {
   const buffer = Buffer.from(base64, "base64");
 
   if (!buffer.length) {
-    throw httpError(400, "image_invalid", "Reference image data is empty.");
+    throw httpError(400, "image_invalid", `${label} data is empty.`);
   }
   if (buffer.length > maxImageBytes) {
-    throw httpError(413, "image_too_large", "Reference image is larger than MAX_IMAGE_BYTES.");
+    throw httpError(413, "image_too_large", `${label} is larger than MAX_IMAGE_BYTES.`);
   }
 
   return { buffer, mime, ext };
 }
 
-function persistInputImage(imageUrl) {
+function persistInputImage(imageUrl, baseUrl = publicBaseUrl, label = "Reference image") {
   if (!imageUrl || !String(imageUrl).startsWith("data:")) return null;
-  const decoded = decodeDataImageUrl(imageUrl);
+  const decoded = decodeDataImageUrl(imageUrl, label);
   if (!decoded) {
-    throw httpError(400, "image_invalid", "Reference image must be a JPEG, PNG, or WEBP data URL.");
+    throw httpError(400, "image_invalid", `${label} must be a JPEG, PNG, or WEBP data URL.`);
   }
 
-  if (!publicBaseUrl) {
-    throw httpError(500, "public_base_url_missing", "PUBLIC_BASE_URL is required to upload inline reference images.");
+  const mediaBaseUrl = baseUrl || publicBaseUrl;
+  if (!mediaBaseUrl) {
+    throw httpError(500, "public_base_url_missing", "PUBLIC_BASE_URL or a public request host is required to upload inline images.");
   }
 
   const filename = `${randomUUID()}${decoded.ext}`;
@@ -522,11 +537,38 @@ function persistInputImage(imageUrl) {
 
   const mediaPath = `/media/inputs/${filename}`;
   return {
-    url: publicMediaUrl(mediaPath),
+    url: publicMediaUrl(mediaPath, mediaBaseUrl),
     mediaPath,
     path: `inputs/${filename}`,
     bytes: decoded.buffer.length,
     mime: decoded.mime,
+  };
+}
+
+function cleanImageUploadName(name, fallbackExt) {
+  const clean = String(name || "")
+    .split(/[\\/]/)
+    .pop()
+    .replace(/[^\w.\-() ]+/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  if (clean) return clean;
+  return `image${fallbackExt || ".jpg"}`;
+}
+
+function uploadedImagePayload(persisted, name) {
+  const file = basename(persisted.path || "");
+  return {
+    id: `i_${file.replace(/\.[^.]+$/, "")}`,
+    name: cleanImageUploadName(name, extname(file) || ".jpg"),
+    src: persisted.url,
+    url: persisted.url,
+    media_path: persisted.mediaPath,
+    path: persisted.path,
+    bytes: persisted.bytes,
+    mime: persisted.mime,
+    added_at: Date.now(),
   };
 }
 
@@ -730,7 +772,7 @@ async function generateTaskCover(id, reason = "task") {
   }
 }
 
-function normalizeGenerateInput(input) {
+function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
   const prompt = String(input.prompt || "").trim();
   if (!prompt) {
     throw httpError(400, "prompt_required", "Prompt is required.");
@@ -767,9 +809,9 @@ function normalizeGenerateInput(input) {
       "For Ark reference-guided generation, pass only reference_image_url and no image_url.",
     ].join(" "));
   }
-  const persistedImage = persistInputImage(rawImageUrl);
-  const persistedLastFrameImage = persistInputImage(rawLastFrameImageUrl);
-  const persistedReferenceImages = rawReferenceImageUrls.map((url) => persistInputImage(url));
+  const persistedImage = persistInputImage(rawImageUrl, mediaBaseUrl, "First frame image");
+  const persistedLastFrameImage = persistInputImage(rawLastFrameImageUrl, mediaBaseUrl, "Last frame image");
+  const persistedReferenceImages = rawReferenceImageUrls.map((url) => persistInputImage(url, mediaBaseUrl, "Reference image"));
   const imageUrl = persistedImage?.url || rawImageUrl;
   const lastFrameImageUrl = persistedLastFrameImage?.url || rawLastFrameImageUrl;
   const referenceImageUrls = rawReferenceImageUrls.map((url, index) => persistedReferenceImages[index]?.url || url);
@@ -1065,16 +1107,31 @@ function schedulePoll(id, delayMs) {
 }
 
 async function handleGenerate(req, res) {
-  const task = await createVideoTask(await readJson(req));
+  const task = await createVideoTask(await readJson(req), publicBaseUrl || requestPublicBaseUrl(req));
   sendJson(res, 202, publicTask(task));
 }
 
-async function createVideoTask(rawInput) {
+async function handleUploadImage(req, res) {
+  const input = await readJson(req);
+  const image = input.image || input.image_url || input.data_url || input.src;
+  if (!image) {
+    throw httpError(400, "image_required", "Image data URL is required.");
+  }
+
+  const persisted = persistInputImage(image, publicBaseUrl || requestPublicBaseUrl(req), "Image");
+  if (!persisted) {
+    throw httpError(400, "image_invalid", "Image must be a JPEG, PNG, or WEBP data URL.");
+  }
+
+  sendJson(res, 201, { image: uploadedImagePayload(persisted, input.name || input.filename) });
+}
+
+async function createVideoTask(rawInput, mediaBaseUrl = publicBaseUrl) {
   if (isShuttingDown) {
     throw httpError(503, "server_shutting_down", "Server is shutting down. Retry on the next deployment.");
   }
 
-  const input = normalizeGenerateInput(rawInput);
+  const input = normalizeGenerateInput(rawInput, mediaBaseUrl);
   const localTaskId = randomUUID();
   const now = Date.now();
   const id = localTaskId;
@@ -1577,6 +1634,11 @@ async function routeApi(req, res, url) {
 
     if (url.pathname === "/api/generate" && req.method === "POST") {
       await handleGenerate(req, res);
+      return true;
+    }
+
+    if ((url.pathname === "/api/images" || url.pathname === "/api/images/upload") && req.method === "POST") {
+      await handleUploadImage(req, res);
       return true;
     }
 

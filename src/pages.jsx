@@ -2,6 +2,7 @@ import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { Icon, DropZone, VideoPlayer, GenerationProgress, useToast } from './components';
 import { useStore, useHashRoute, relTime, fmtDate } from './store';
 import { authHeader, clearToken, getToken } from './auth';
+import { prepareUploadImage } from './imageUpload';
 
 const HOST_PARAMS = {
   resolutions: ["720p", "1080p", "2K"],
@@ -137,6 +138,44 @@ async function fetchJson(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+function imageFromUploadResponse(data, fallback = {}) {
+  const image = data?.image || data || {};
+  const src = image.src || image.url;
+  if (!src) {
+    throw new Error("Image upload did not return a URL.");
+  }
+
+  return {
+    id: image.id || fallback.id,
+    name: image.name || fallback.name || "upload.png",
+    src,
+    url: image.url || src,
+    mediaPath: image.media_path || fallback.mediaPath,
+    path: image.path || fallback.path,
+    bytes: image.bytes || fallback.bytes,
+    mime: image.mime || fallback.mime,
+    addedAt: image.added_at || fallback.addedAt || Date.now(),
+    cloud: true,
+  };
+}
+
+async function uploadImageAsset(img) {
+  const src = String(img?.src || "");
+  if (!src) {
+    throw new Error("Image is missing.");
+  }
+  if (!src.startsWith("data:")) {
+    return { ...img, cloud: true };
+  }
+
+  const data = await fetchJson("/api/images", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: img.name, image: src }),
+  });
+  return imageFromUploadResponse(data, img);
 }
 
 async function deleteRemoteTask(v) {
@@ -567,7 +606,7 @@ function DurationSlider({ value, onChange, min, max }) {
 }
 
 export function CreatePage() {
-  const { state, addImage, addVideo } = useStore();
+  const { state, addImage, updateImage, addVideo } = useStore();
   const route = useHashRoute();
   const { navigate, query } = route;
 
@@ -592,26 +631,54 @@ export function CreatePage() {
       : "t2v";
 
   const [submitting, setSubmitting] = useState(false);
+  const [pendingImageUploads, setPendingImageUploads] = useState(0);
   const { show, node } = useToast();
 
-  const toStoredImage = (img) => {
-    if (img.id) return img;
-    return addImage({ name: img.name || "upload.png", src: img.src });
+  const toStoredImage = async (img) => {
+    const remote = await uploadImageAsset(img);
+    if (img.id) {
+      const patch = {
+        ...remote,
+        id: img.id,
+        addedAt: img.addedAt || remote.addedAt,
+      };
+      updateImage(img.id, patch);
+      return { ...img, ...patch };
+    }
+    return addImage(remote);
+  };
+
+  const trackImageUpload = async (work) => {
+    setPendingImageUploads((count) => count + 1);
+    try {
+      await work();
+    } catch (error) {
+      show(error.message || "Image upload failed");
+      throw error;
+    } finally {
+      setPendingImageUploads((count) => Math.max(0, count - 1));
+    }
   };
 
   const onPickFile = (img) => {
-    const item = toStoredImage(img);
-    setImage(item);
+    return trackImageUpload(async () => {
+      const item = await toStoredImage(img);
+      setImage(item);
+    });
   };
 
   const onPickLastFrame = (img) => {
-    const item = toStoredImage(img);
-    setLastFrame(item);
+    return trackImageUpload(async () => {
+      const item = await toStoredImage(img);
+      setLastFrame(item);
+    });
   };
 
   const onPickReference = (img) => {
-    const item = toStoredImage(img);
-    setReferenceImages((items) => items.some((x) => x.id === item.id || x.src === item.src) ? items : [...items, item].slice(0, 6));
+    return trackImageUpload(async () => {
+      const item = await toStoredImage(img);
+      setReferenceImages((items) => items.some((x) => x.id === item.id || x.src === item.src) ? items : [...items, item].slice(0, 6));
+    });
   };
 
   const libraryStrip = (onSelect, selected = []) => {
@@ -643,6 +710,7 @@ export function CreatePage() {
 
   const startGen = async () => {
     if (submitting) return;
+    if (pendingImageUploads > 0) { show("Wait for image upload to finish"); return; }
     if (!prompt.trim()) { show("Write a prompt to generate"); return; }
     if (inputMode === "frames" && lastFrame && !image) { show("Add a first frame before using a last frame"); return; }
     if (inputMode === "references" && referenceImages.length === 0) { show("Add at least one reference image"); return; }
@@ -1235,6 +1303,7 @@ export function LibraryPage() {
   const [search, setSearch] = useState("");
   const { show, node } = useToast();
   const inputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
   const libraryVideos = useMemo(() => [...state.videos].sort(taskSort), [state.videos]);
   const visibleVideos = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1250,14 +1319,23 @@ export function LibraryPage() {
   }, [libraryVideos, search]);
   const activeVideos = libraryVideos.filter((v) => isActiveTask(v.status));
 
-  const onUpload = (files) => {
-    if (!files) return;
-    Array.from(files).forEach((f) => {
-      const r = new FileReader();
-      r.onload = (e) => addImage({ name: f.name, src: e.target.result });
-      r.readAsDataURL(f);
-    });
-    show("Added to library");
+  const onUpload = async (files) => {
+    const list = Array.from(files || []);
+    if (!list.length || uploading) return;
+    setUploading(true);
+    try {
+      const uploaded = await Promise.all(list.map(async (file) => {
+        const src = await prepareUploadImage(file);
+        return uploadImageAsset({ name: file.name, src });
+      }));
+      uploaded.forEach((img) => addImage(img));
+      show(`Uploaded ${uploaded.length} image${uploaded.length === 1 ? "" : "s"}`);
+    } catch (error) {
+      show(error.message || "Image upload failed");
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
   };
 
   return (
@@ -1285,8 +1363,8 @@ export function LibraryPage() {
       {tab === "images" && (
         <>
           <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
-            <button className="btn btn-primary" onClick={() => inputRef.current?.click()}>
-              <Icon name="upload" size={14}/> Upload images
+            <button className="btn btn-primary" onClick={() => inputRef.current?.click()} disabled={uploading}>
+              <Icon name="upload" size={14} className={uploading ? "spin-ic" : undefined}/> {uploading ? "Uploading" : "Upload images"}
             </button>
             <input ref={inputRef} type="file" accept="image/*" multiple
                    style={{ display: "none" }}

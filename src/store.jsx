@@ -63,6 +63,13 @@ export function StoreProvider({ children }) {
     setState((s) => ({ ...s, images: s.images.filter((i) => i.id !== id) }));
   }, []);
 
+  const updateImage = useCallback((id, patch) => {
+    setState((s) => ({
+      ...s,
+      images: s.images.map((img) => (img.id === id ? { ...img, ...patch } : img)),
+    }));
+  }, []);
+
   const addVideo = useCallback((v) => {
     const item = {
       id: "v_" + Math.random().toString(36).slice(2, 9),
@@ -103,8 +110,8 @@ export function StoreProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ state, setApiKey, addImage, removeImage, addVideo, removeVideo, updateVideo, upsertVideo }),
-    [state, setApiKey, addImage, removeImage, addVideo, removeVideo, updateVideo, upsertVideo]
+    () => ({ state, setApiKey, addImage, removeImage, updateImage, addVideo, removeVideo, updateVideo, upsertVideo }),
+    [state, setApiKey, addImage, removeImage, updateImage, addVideo, removeVideo, updateVideo, upsertVideo]
   );
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;

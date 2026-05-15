@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { prepareUploadImage } from './imageUpload';
 
 export function Icon({ name, size = 16, ...rest }) {
   const paths = {
@@ -22,70 +23,44 @@ export function Icon({ name, size = 16, ...rest }) {
   );
 }
 
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => resolve(String(e.target.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("Failed to read image"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Failed to load image"));
-    img.src = src;
-  });
-}
-
-async function prepareUploadImage(file) {
-  const original = await readFileAsDataUrl(file);
-  const img = await loadImage(original);
-  const maxSide = 1600;
-  const longest = Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height);
-
-  if (longest <= maxSide && file.size <= 1.5 * 1024 * 1024) {
-    return original;
-  }
-
-  const scale = Math.min(1, maxSide / longest);
-  const width = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
-  const height = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d", { alpha: false });
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, width, height);
-  ctx.drawImage(img, 0, 0, width, height);
-  return canvas.toDataURL("image/jpeg", 0.88);
-}
-
 export function DropZone({ onFile, image, onClear, hint = "Drop image, or click to browse", accept = "image/*", compact = false }) {
   const [over, setOver] = useState(false);
+  const [busy, setBusy] = useState(false);
   const inputRef = useRef(null);
   const handle = async (files) => {
-    if (!files || !files[0]) return;
+    if (busy || !files || !files[0]) return;
     const file = files[0];
     try {
+      setBusy(true);
       const src = await prepareUploadImage(file);
-      onFile({ name: file.name, src });
+      await onFile({ name: file.name, src });
     } catch (error) {
       console.warn("image upload failed", error);
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
     }
   };
   return (
     <div
       className={"drop" + (over ? " over" : "")}
-      onClick={() => !image && inputRef.current?.click()}
+      onClick={() => !busy && !image && inputRef.current?.click()}
       onDragOver={(e) => { e.preventDefault(); setOver(true); }}
       onDragLeave={() => setOver(false)}
-      onDrop={(e) => {
+      onDrop={async (e) => {
         e.preventDefault(); setOver(false);
         const data = e.dataTransfer.getData("application/x-vgs-image");
-        if (data) { try { onFile(JSON.parse(data)); return; } catch { return; } }
+        if (data) {
+          try {
+            setBusy(true);
+            await onFile(JSON.parse(data));
+          } catch {
+            // Ignore malformed drag payloads.
+          } finally {
+            setBusy(false);
+          }
+          return;
+        }
         handle(e.dataTransfer.files);
       }}
       style={image
@@ -109,8 +84,8 @@ export function DropZone({ onFile, image, onClear, hint = "Drop image, or click 
         </div>
       ) : (
         <>
-          <Icon name="upload" size={32} className="drop-icon" />
-          <div style={{ fontSize: 14, fontWeight: 500 }}>{hint}</div>
+          <Icon name="upload" size={32} className={"drop-icon" + (busy ? " spin-ic" : "")} />
+          <div style={{ fontSize: 14, fontWeight: 500 }}>{busy ? "Uploading image" : hint}</div>
           <div className="mono muted-2" style={{ fontSize: 11, letterSpacing: ".06em" }}>
             JPEG &middot; PNG &middot; WEBP &middot; up to 10 MB
           </div>

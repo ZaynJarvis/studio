@@ -17,6 +17,7 @@ The server owns Ark task state and persists it under `DATA_DIR`.
 
 - `DATA_DIR/tasks.json` stores the durable queue/success task ledger.
 - `DATA_DIR/public/tasks.json` is a sanitized static snapshot of the same ledger, served at `/state/tasks.json`.
+- `DATA_DIR/public/inputs/` stores uploaded scene/reference images, served at `/media/inputs/...`.
 - `DATA_DIR/public/artifacts/` stores downloaded successful videos, served at `/media/artifacts/...`.
 - `DATA_DIR/public/covers/` stores first-frame JPG covers extracted from cached videos, served at `/media/covers/...`.
 - `MAX_ARTIFACT_BYTES=524288000` caps the video artifact cache size.
@@ -24,6 +25,7 @@ The server owns Ark task state and persists it under `DATA_DIR`.
 - `TASK_MONITOR_MODE=poll` keeps polling Ark in the background.
 - `TASK_MONITOR_MODE=webhook` sends `callback_url` on task creation and accepts Ark callbacks at `/api/ark/webhook`.
 - In webhook mode set `PUBLIC_BASE_URL` or `ARK_CALLBACK_BASE_URL` to the public app origin. If `ARK_WEBHOOK_TOKEN` is set, the token is appended to the callback URL and verified on receipt.
+- `POST /api/images` accepts a JPEG/PNG/WEBP data URL and returns a durable media URL. Library uploads and Create-page frame/reference uploads use this endpoint before saving the image locally or submitting a video task.
 
 ## AIGC storyboard workflow
 

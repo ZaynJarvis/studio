@@ -43,6 +43,13 @@ const webAccessToken = process.env.MCP_TOKEN || "";
 const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
 const maxJsonBodyBytes = Number(process.env.MAX_JSON_BODY_BYTES || Math.ceil(maxImageBytes * 1.5) + 1024 * 1024);
 const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1024);
+const imageRepoBaseUrl = (
+  process.env.IMAGE_REPO_BASE_URL ||
+  process.env.IMAGEREPO_BASE_URL ||
+  "https://image.zaynjarvis.com"
+).replace(/\/+$/, "");
+const imageRepoUploadKey = process.env.IMAGE_REPO_UPLOAD_KEY || process.env.IMAGEREPO_UPLOAD_KEY || process.env.MCP_TOKEN || "";
+const imageRepoTag = (process.env.IMAGE_REPO_TAG || process.env.IMAGEREPO_TAG || "studio").trim();
 const shutdownGraceMs = clampInt(process.env.SHUTDOWN_GRACE_MS, 1_000, 60_000, 20_000);
 
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "expired"]);
@@ -545,6 +552,63 @@ function persistInputImage(imageUrl, baseUrl = publicBaseUrl, label = "Reference
   };
 }
 
+function assertImageRepoConfigured() {
+  if (!imageRepoBaseUrl) {
+    throw httpError(500, "image_repo_missing", "IMAGE_REPO_BASE_URL is required for image uploads.");
+  }
+  if (!imageRepoUploadKey) {
+    throw httpError(500, "image_repo_key_missing", "IMAGE_REPO_UPLOAD_KEY is required for image uploads.");
+  }
+}
+
+async function uploadImageToRepo(imageUrl, name, label = "Image") {
+  if (!imageUrl || !String(imageUrl).startsWith("data:")) return null;
+  const decoded = decodeDataImageUrl(imageUrl, label);
+  if (!decoded) {
+    throw httpError(400, "image_invalid", `${label} must be a JPEG, PNG, or WEBP data URL.`);
+  }
+
+  assertImageRepoConfigured();
+
+  const filename = cleanImageUploadName(name, decoded.ext);
+  const form = new FormData();
+  form.append("image", new Blob([decoded.buffer], { type: decoded.mime }), filename);
+  if (imageRepoTag) form.append("tag", imageRepoTag);
+
+  const response = await fetch(`${imageRepoBaseUrl}/api/upload`, {
+    method: "POST",
+    headers: {
+      "x-upload-key": imageRepoUploadKey,
+    },
+    body: form,
+  });
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw httpError(
+      response.status || 502,
+      payload?.error?.code || "image_repo_upload_failed",
+      payload?.error?.message || payload?.error || `Image repository upload failed with HTTP ${response.status}.`,
+      payload
+    );
+  }
+  if (!payload?.url) {
+    throw httpError(502, "image_repo_bad_response", "Image repository did not return a URL.", payload);
+  }
+
+  return {
+    url: payload.url,
+    mediaPath: payload.url,
+    path: null,
+    key: payload.key || null,
+    bytes: payload.size ?? decoded.buffer.length,
+    mime: payload.contentType || decoded.mime,
+    tag: payload.tag || imageRepoTag || "",
+    duplicate: Boolean(payload.duplicate),
+    provider: "imagerepo",
+  };
+}
+
 function cleanImageUploadName(name, fallbackExt) {
   const clean = String(name || "")
     .split(/[\\/]/)
@@ -558,7 +622,7 @@ function cleanImageUploadName(name, fallbackExt) {
 }
 
 function uploadedImagePayload(persisted, name) {
-  const file = basename(persisted.path || "");
+  const file = basename(persisted.path || persisted.key || "");
   return {
     id: `i_${file.replace(/\.[^.]+$/, "")}`,
     name: cleanImageUploadName(name, extname(file) || ".jpg"),
@@ -566,6 +630,10 @@ function uploadedImagePayload(persisted, name) {
     url: persisted.url,
     media_path: persisted.mediaPath,
     path: persisted.path,
+    key: persisted.key || null,
+    tag: persisted.tag || null,
+    provider: persisted.provider || "local",
+    duplicate: Boolean(persisted.duplicate),
     bytes: persisted.bytes,
     mime: persisted.mime,
     added_at: Date.now(),
@@ -772,7 +840,7 @@ async function generateTaskCover(id, reason = "task") {
   }
 }
 
-function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
+async function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
   const prompt = String(input.prompt || "").trim();
   if (!prompt) {
     throw httpError(400, "prompt_required", "Prompt is required.");
@@ -809,9 +877,11 @@ function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
       "For Ark reference-guided generation, pass only reference_image_url and no image_url.",
     ].join(" "));
   }
-  const persistedImage = persistInputImage(rawImageUrl, mediaBaseUrl, "First frame image");
-  const persistedLastFrameImage = persistInputImage(rawLastFrameImageUrl, mediaBaseUrl, "Last frame image");
-  const persistedReferenceImages = rawReferenceImageUrls.map((url) => persistInputImage(url, mediaBaseUrl, "Reference image"));
+  const persistedImage = await uploadImageToRepo(rawImageUrl, input.image?.name || input.image_name || input.imageName || "first-frame.jpg", "First frame image");
+  const persistedLastFrameImage = await uploadImageToRepo(rawLastFrameImageUrl, input.last_frame_name || input.lastFrameName || "last-frame.jpg", "Last frame image");
+  const persistedReferenceImages = await Promise.all(rawReferenceImageUrls.map((url, index) => (
+    uploadImageToRepo(url, input.reference_image_names?.[index] || input.referenceImageNames?.[index] || `reference-${index + 1}.jpg`, "Reference image")
+  )));
   const imageUrl = persistedImage?.url || rawImageUrl;
   const lastFrameImageUrl = persistedLastFrameImage?.url || rawLastFrameImageUrl;
   const referenceImageUrls = rawReferenceImageUrls.map((url, index) => persistedReferenceImages[index]?.url || url);
@@ -1118,7 +1188,7 @@ async function handleUploadImage(req, res) {
     throw httpError(400, "image_required", "Image data URL is required.");
   }
 
-  const persisted = persistInputImage(image, publicBaseUrl || requestPublicBaseUrl(req), "Image");
+  const persisted = await uploadImageToRepo(image, input.name || input.filename || "image.jpg", "Image");
   if (!persisted) {
     throw httpError(400, "image_invalid", "Image must be a JPEG, PNG, or WEBP data URL.");
   }
@@ -1131,7 +1201,7 @@ async function createVideoTask(rawInput, mediaBaseUrl = publicBaseUrl) {
     throw httpError(503, "server_shutting_down", "Server is shutting down. Retry on the next deployment.");
   }
 
-  const input = normalizeGenerateInput(rawInput, mediaBaseUrl);
+  const input = await normalizeGenerateInput(rawInput, mediaBaseUrl);
   const localTaskId = randomUUID();
   const now = Date.now();
   const id = localTaskId;
@@ -1411,6 +1481,19 @@ function webAuthorized(req, url) {
 function mcpTools() {
   return [
     {
+      name: "upload_image",
+      description: "Upload a JPEG/PNG/WEBP data URL to Studio's image library. The server stores it in imagerepo with IMAGE_REPO_TAG=studio and returns the public image URL.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          image: { type: "string", description: "JPEG/PNG/WEBP data URL to upload." },
+          data_url: { type: "string", description: "Alias for image." },
+          name: { type: "string", description: "Optional filename for the uploaded image." },
+        },
+        additionalProperties: true,
+      },
+    },
+    {
       name: "create_video_task",
       description: "Create a Studio/Seedance 2.0 Pro video task from text, actual first/last scene frames, or Ark reference image(s). Do not mix first/last-frame inputs with reference-media inputs in one task. Character sheets, info graphs, turnarounds, and reference boards must be passed as reference_image_url(s), never as image_url. For best shot control, use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame as image_url.",
       inputSchema: {
@@ -1473,6 +1556,18 @@ function mcpTextResult(payload) {
 }
 
 async function callMcpTool(name, args = {}) {
+  if (name === "upload_image") {
+    const image = args.image || args.data_url || args.image_url || args.src;
+    if (!image) {
+      throw httpError(400, "image_required", "Image data URL is required.");
+    }
+    const uploaded = await uploadImageToRepo(image, args.name || args.filename || "image.jpg", "Image");
+    if (!uploaded) {
+      throw httpError(400, "image_invalid", "Image must be a JPEG, PNG, or WEBP data URL.");
+    }
+    return mcpTextResult({ image: uploadedImagePayload(uploaded, args.name || args.filename) });
+  }
+
   if (name === "create_video_task") {
     const task = await createVideoTask({ ...args, model: "seedance-pro" });
     return mcpTextResult({ task: publicTask(task) });
@@ -1980,6 +2075,11 @@ const server = createServer(async (req, res) => {
       data_dir: dataDir,
       max_json_body_bytes: maxJsonBodyBytes,
       max_image_bytes: maxImageBytes,
+      image_repo: {
+        base_url: imageRepoBaseUrl,
+        tag: imageRepoTag || null,
+        upload_key_configured: Boolean(imageRepoUploadKey),
+      },
       artifacts: [...tasks.values()].filter((task) => task.artifactUrl).length,
       covers: [...tasks.values()].filter((task) => task.coverUrl).length,
       input_images: [...tasks.values()].filter((task) => task.inputImagePath).length,

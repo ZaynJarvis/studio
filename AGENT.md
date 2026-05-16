@@ -42,6 +42,7 @@ index.html          — Google Fonts links, data-theme="studio" on <body>
 
 - **Mode is implicit**: if a scene first-frame image is present → I→V, if only `reference_image_url(s)` is present → reference-guided video, otherwise → T→V. `last_frame_image_url` can be paired with `image_url`; do not combine first/last-frame inputs with reference-media inputs in one Ark task. Character sheets, info graphs, turnarounds, and reference boards are reference inputs, not first-frame inputs; for best shot control generate an actual scene/storyboard frame with imagegen first
 - **Ark API key**: held by the server (`ARK_API_KEY` env). The frontend never sees it
+- **Image hosting**: Studio image uploads go to imagerepo (`IMAGE_REPO_BASE_URL`, `IMAGE_REPO_UPLOAD_KEY`) with `IMAGE_REPO_TAG=studio`; new images are not hosted from `/media/inputs`
 - **Web access gate**: if `MCP_TOKEN` is set on the server, the SPA shows a login screen on first load; the token (same one used for `/mcp` bearer auth) is stored in `localStorage["vgs.accessToken"]` and sent as `Authorization: Bearer ...` (or `?access_token=...`) on every `/api/*` and `/state/tasks.json` call. `/healthz`, `/media/*`, and static assets stay open. Leaving the env unset disables the gate (dev mode)
 - **Template flow**: any video can prefill Create via `?from=<videoId>` query param
 - **Seed data**: 6 sample videos + 3 images ship by default (Google public sample videos + Unsplash thumbnails)

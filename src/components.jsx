@@ -14,6 +14,7 @@ export function Icon({ name, size = 16, ...rest }) {
     share: <path d="M16 6l-4-4-4 4m4-4v13M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none"/>,
     key: <><circle cx="8" cy="14" r="4" stroke="currentColor" strokeWidth="1.6" fill="none"/><path d="M11 11l9-9m-3 0h3v3m-3 3l-2-2" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round"/></>,
     arrowLeft: <path d="M19 12H5m0 0l6 6m-6-6l6-6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none"/>,
+    calendar: <><rect x="4" y="5" width="16" height="16" rx="2" stroke="currentColor" strokeWidth="1.6" fill="none"/><path d="M8 3v4M16 3v4M4 10h16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></>,
     x: <path d="M6 6l12 12M6 18L18 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>,
     copy: <><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.6" fill="none"/><path d="M5 15V5a2 2 0 012-2h10" stroke="currentColor" strokeWidth="1.6" fill="none"/></>,
     refresh: <path d="M3 12a9 9 0 0115-6.7L21 8M21 3v5h-5M21 12a9 9 0 01-15 6.7L3 16m0 5v-5h5" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round"/>,

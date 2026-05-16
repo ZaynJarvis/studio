@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { StoreProvider, useHashRoute } from './store';
-import { Nav, HomePage, CreatePage, PreviewPage, LibraryPage, ServerTaskSync } from './pages';
+import { Nav, HomePage, CreatePage, PreviewPage, LibraryPage, ServerTaskSync, RemoteImageSync } from './pages';
 import { AuthGate } from './auth';
 import './themes.css';
 
@@ -27,6 +27,7 @@ function App() {
   return (
     <div className="app">
       <ServerTaskSync />
+      <RemoteImageSync />
       <Nav route={route} navigate={route.navigate} />
       <main className="main">
         <Page />

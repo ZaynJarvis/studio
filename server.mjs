@@ -297,6 +297,14 @@ function cleanGeneratedTitle(text, fallback) {
   return limitTitle(text, limitTitle(fallback));
 }
 
+function titleImageUrls(input) {
+  return normalizeUrlList([
+    input.imageUrl,
+    input.lastFrameImageUrl,
+    ...normalizeUrlList(input.referenceImageUrls),
+  ]).slice(0, 4);
+}
+
 function extractResponseText(raw) {
   if (typeof raw?.output_text === "string") return raw.output_text;
 
@@ -332,19 +340,18 @@ function extractResponseText(raw) {
 }
 
 async function generateTaskTitle(input, signal = undefined) {
-  const fallback = titleFromPrompt(input.prompt);
+  const fallback = "Untitled take";
   if (!arkTitleModel) return fallback;
 
-  const content = [];
-  if (input.imageUrl) {
-    content.push({ type: "input_image", image_url: input.imageUrl });
-  }
+  const images = titleImageUrls(input);
+  const content = images.map((imageUrl) => ({ type: "input_image", image_url: imageUrl }));
   content.push({
     type: "input_text",
     text: [
-      "Create a short production title for a video generation task.",
-      "Return only the title, no quotes, no prefix, and do not copy the full prompt.",
+      "Create a short production title for this video generation task using the attached visual reference(s) first.",
+      "Return only the title, no quotes, no prefix, and do not copy or truncate the prompt.",
       "If the prompt is Chinese, use Chinese and keep it 4 to 10 characters. Otherwise use English and keep it 2 to 5 words.",
+      images.length ? "Base the title on visible subject, setting, action, or mood from the image(s)." : "No image is attached, so infer a concise visual title from the prompt.",
       `Video prompt: ${input.prompt}`,
     ].join("\n"),
   });
@@ -637,6 +644,75 @@ function uploadedImagePayload(persisted, name) {
     bytes: persisted.bytes,
     mime: persisted.mime,
     added_at: Date.now(),
+  };
+}
+
+function imageTimestamp(value) {
+  const ts = Date.parse(value || "");
+  return Number.isFinite(ts) ? ts : Date.now();
+}
+
+function repoImagePayload(image) {
+  const key = String(image?.key || "");
+  const url = String(image?.url || "");
+  const tag = String(image?.tag || imageRepoTag || "");
+  const file = basename(key || new URL(url || "https://local.invalid/image").pathname);
+  const safeId = [tag, file || url]
+    .filter(Boolean)
+    .join("_")
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 96) || randomUUID();
+  const addedAt = imageTimestamp(image?.lastModified || image?.last_modified || image?.createdAt || image?.created_at);
+
+  return {
+    id: `i_repo_${safeId}`,
+    name: image?.name || image?.filename || `${tag || "image"}-${(file || safeId).slice(0, 10)}`,
+    src: url,
+    url,
+    media_path: url,
+    path: null,
+    key: key || null,
+    tag: tag || null,
+    provider: "imagerepo",
+    cloud: true,
+    bytes: image?.size ?? image?.bytes ?? null,
+    mime: image?.contentType || image?.content_type || null,
+    added_at: addedAt,
+    addedAt,
+  };
+}
+
+async function listImagesFromRepo({ limit = 100, cursor = "", tag = imageRepoTag } = {}) {
+  assertImageRepoConfigured();
+
+  const endpoint = new URL(`${imageRepoBaseUrl}/api/images`);
+  endpoint.searchParams.set("limit", String(limit));
+  if (cursor) endpoint.searchParams.set("cursor", cursor);
+  if (tag) endpoint.searchParams.set("tag", tag);
+
+  const response = await fetch(endpoint, {
+    headers: {
+      "x-upload-key": imageRepoUploadKey,
+    },
+  });
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw httpError(
+      response.status || 502,
+      payload?.error?.code || "image_repo_list_failed",
+      payload?.error?.message || payload?.error || `Image repository list failed with HTTP ${response.status}.`,
+      payload
+    );
+  }
+
+  return {
+    images: Array.isArray(payload.images) ? payload.images.map(repoImagePayload) : [],
+    nextCursor: payload.nextCursor || null,
+    total: payload.total ?? null,
+    tag,
+    provider: "imagerepo",
   };
 }
 
@@ -935,7 +1011,7 @@ async function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
     camera,
     uiModel,
     arkModel,
-    title: titleFromPrompt(prompt),
+    title: "Untitled take",
   };
 }
 
@@ -1194,6 +1270,13 @@ async function handleUploadImage(req, res) {
   }
 
   sendJson(res, 201, { image: uploadedImagePayload(persisted, input.name || input.filename) });
+}
+
+async function handleListImages(req, res, url) {
+  const limit = clampInt(url.searchParams.get("limit"), 1, 100, 100);
+  const cursor = url.searchParams.get("cursor") || "";
+  const tag = url.searchParams.has("tag") ? String(url.searchParams.get("tag") || "").trim() : imageRepoTag;
+  sendJson(res, 200, await listImagesFromRepo({ limit, cursor, tag }));
 }
 
 async function createVideoTask(rawInput, mediaBaseUrl = publicBaseUrl) {
@@ -1734,6 +1817,11 @@ async function routeApi(req, res, url) {
 
     if ((url.pathname === "/api/images" || url.pathname === "/api/images/upload") && req.method === "POST") {
       await handleUploadImage(req, res);
+      return true;
+    }
+
+    if (url.pathname === "/api/images" && req.method === "GET") {
+      await handleListImages(req, res, url);
       return true;
     }
 

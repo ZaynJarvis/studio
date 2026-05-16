@@ -40,6 +40,12 @@ function saveState(s) {
   }
 }
 
+function imageKeys(img) {
+  return [img?.id, img?.src, img?.url, img?.key, img?.mediaPath, img?.media_path]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
 const StoreCtx = createContext(null);
 
 export function StoreProvider({ children }) {
@@ -68,6 +74,35 @@ export function StoreProvider({ children }) {
       ...s,
       images: s.images.map((img) => (img.id === id ? { ...img, ...patch } : img)),
     }));
+  }, []);
+
+  const mergeImages = useCallback((images) => {
+    const incoming = (Array.isArray(images) ? images : [])
+      .filter((img) => img?.src || img?.url)
+      .map((img) => ({
+        addedAt: img.addedAt || img.added_at || Date.now(),
+        ...img,
+        src: img.src || img.url,
+        url: img.url || img.src,
+        mediaPath: img.mediaPath || img.media_path || img.url || img.src,
+      }));
+
+    if (!incoming.length) return;
+
+    setState((s) => {
+      const seen = new Set(s.images.flatMap(imageKeys));
+      const additions = [];
+
+      for (const img of incoming) {
+        const keys = imageKeys(img);
+        if (keys.some((key) => seen.has(key))) continue;
+        additions.push(img);
+        keys.forEach((key) => seen.add(key));
+      }
+
+      if (!additions.length) return s;
+      return { ...s, images: [...additions, ...s.images] };
+    });
   }, []);
 
   const addVideo = useCallback((v) => {
@@ -110,8 +145,8 @@ export function StoreProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ state, setApiKey, addImage, removeImage, updateImage, addVideo, removeVideo, updateVideo, upsertVideo }),
-    [state, setApiKey, addImage, removeImage, updateImage, addVideo, removeVideo, updateVideo, upsertVideo]
+    () => ({ state, setApiKey, addImage, removeImage, updateImage, mergeImages, addVideo, removeVideo, updateVideo, upsertVideo }),
+    [state, setApiKey, addImage, removeImage, updateImage, mergeImages, addVideo, removeVideo, updateVideo, upsertVideo]
   );
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;

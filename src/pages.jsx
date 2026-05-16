@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import { useState, useRef, useMemo, useEffect } from 'react';
 import { Icon, DropZone, VideoPlayer, GenerationProgress, useToast } from './components';
 import { useStore, useHashRoute, relTime, fmtDate } from './store';
 import { authHeader, clearToken, getToken } from './auth';
@@ -158,6 +158,30 @@ function imageFromUploadResponse(data, fallback = {}) {
   };
 }
 
+function imageFromListResponse(image) {
+  const src = image?.src || image?.url;
+  if (!src) return null;
+  const addedAt = image.addedAt
+    || (typeof image.added_at === "number" ? image.added_at : Date.parse(image.added_at || image.lastModified || image.last_modified || ""))
+    || Date.now();
+
+  return {
+    id: image.id || image.key || src,
+    name: image.name || image.filename || "imagerepo image",
+    src,
+    url: image.url || src,
+    mediaPath: image.mediaPath || image.media_path || image.url || src,
+    path: image.path || null,
+    key: image.key || null,
+    tag: image.tag || null,
+    provider: image.provider || "imagerepo",
+    bytes: image.bytes || image.size || null,
+    mime: image.mime || image.contentType || image.content_type || null,
+    addedAt,
+    cloud: true,
+  };
+}
+
 async function uploadImageAsset(img) {
   const src = String(img?.src || "");
   if (!src) {
@@ -197,22 +221,6 @@ function isAppleTouchDevice() {
     || (platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
-function canAttemptFileShare() {
-  return typeof navigator !== "undefined"
-    && typeof navigator.share === "function"
-    && typeof navigator.canShare === "function"
-    && typeof File === "function";
-}
-
-function canShareVideoFile(file) {
-  if (!canAttemptFileShare()) return false;
-  try {
-    return navigator.canShare({ files: [file] });
-  } catch {
-    return false;
-  }
-}
-
 function videoExtensionFromSrc(src) {
   try {
     const ext = new URL(src, window.location.href).pathname.match(/\.(mp4|m4v|mov|webm)$/i)?.[0];
@@ -223,12 +231,6 @@ function videoExtensionFromSrc(src) {
   return ".mp4";
 }
 
-function videoMimeFromExtension(ext) {
-  if (ext === ".mov") return "video/quicktime";
-  if (ext === ".webm") return "video/webm";
-  return "video/mp4";
-}
-
 function videoFileName(v) {
   const fallback = String(v?.taskId || v?.id || "videogen-render").slice(0, 24) || "videogen-render";
   const base = String(v?.title || fallback)
@@ -237,22 +239,6 @@ function videoFileName(v) {
     .replace(/^-+|-+$/g, "")
     .toLowerCase() || fallback;
   return `${base}${videoExtensionFromSrc(v?.src || "")}`;
-}
-
-async function fetchVideoFile(src, filename) {
-  if (typeof File !== "function") {
-    throw new Error("This browser cannot prepare videos for sharing.");
-  }
-
-  const res = await fetch(src, { credentials: "same-origin", cache: "force-cache" });
-  if (!res.ok) {
-    throw new Error(`Video download failed with HTTP ${res.status}`);
-  }
-
-  const blob = await res.blob();
-  const ext = videoExtensionFromSrc(filename);
-  const type = blob.type || videoMimeFromExtension(ext);
-  return new File([blob], filename, { type, lastModified: Date.now() });
 }
 
 function downloadVideoLink(src, filename) {
@@ -323,6 +309,34 @@ export function ServerTaskSync() {
       document.removeEventListener("visibilitychange", syncNow);
     };
   }, [updateVideo, upsertVideo]);
+
+  return null;
+}
+
+export function RemoteImageSync() {
+  const { mergeImages } = useStore();
+
+  useEffect(() => {
+    let stopped = false;
+
+    const sync = async () => {
+      try {
+        const data = await fetchJson("/api/images?limit=100");
+        if (stopped) return;
+        mergeImages((data.images || []).map(imageFromListResponse).filter(Boolean));
+      } catch (error) {
+        console.warn("image library sync failed", error);
+      }
+    };
+
+    sync();
+    window.addEventListener("focus", sync);
+
+    return () => {
+      stopped = true;
+      window.removeEventListener("focus", sync);
+    };
+  }, [mergeImages]);
 
   return null;
 }
@@ -954,79 +968,10 @@ export function PreviewPage() {
   const shouldPoll = taskId && (!v || v.taskId || isActiveTask(v.status));
   const videoRef = useRef(v);
   const [taskError, setTaskError] = useState(null);
-  const shareFileRef = useRef(null);
-  const shareFilePromiseRef = useRef(null);
-  const [iosShareStatus, setIosShareStatus] = useState("idle");
-  const videoId = v?.id;
-  const videoTaskId = v?.taskId;
-  const videoSrc = v?.src;
-  const videoTitle = v?.title;
-  const shareVideo = useMemo(() => videoSrc ? {
-    id: videoId,
-    taskId: videoTaskId,
-    src: videoSrc,
-    title: videoTitle,
-  } : null, [videoId, videoTaskId, videoSrc, videoTitle]);
 
   useEffect(() => {
     videoRef.current = v;
   }, [v]);
-
-  const beginIosShareFileLoad = useCallback((video) => {
-    if (!video?.src) return Promise.reject(new Error("Video is not ready yet"));
-    const filename = videoFileName(video);
-    const cached = shareFileRef.current;
-    if (cached?.src === video.src && cached.filename === filename) {
-      setIosShareStatus(canShareVideoFile(cached.file) ? "ready" : "unavailable");
-      return Promise.resolve(cached.file);
-    }
-
-    const pending = shareFilePromiseRef.current;
-    if (pending?.src === video.src && pending.filename === filename) {
-      return pending.promise;
-    }
-
-    setIosShareStatus("preparing");
-    let entry = null;
-    const promise = fetchVideoFile(video.src, filename)
-      .then((file) => {
-        shareFileRef.current = { src: video.src, filename, file };
-        setIosShareStatus(canShareVideoFile(file) ? "ready" : "unavailable");
-        return file;
-      })
-      .catch((error) => {
-        setIosShareStatus("unavailable");
-        throw error;
-      })
-      .finally(() => {
-        if (shareFilePromiseRef.current === entry) {
-          shareFilePromiseRef.current = null;
-        }
-      });
-
-    entry = { src: video.src, filename, promise };
-    shareFilePromiseRef.current = entry;
-    promise.catch(() => {});
-    return promise;
-  }, []);
-
-  useEffect(() => {
-    shareFileRef.current = null;
-    shareFilePromiseRef.current = null;
-  }, [videoSrc]);
-
-  useEffect(() => {
-    if (!shareVideo?.src || !isAppleTouchDevice() || !canAttemptFileShare()) return undefined;
-    let cancelled = false;
-    beginIosShareFileLoad(shareVideo)
-      .then((file) => {
-        if (!cancelled) setIosShareStatus(canShareVideoFile(file) ? "ready" : "unavailable");
-      })
-      .catch(() => {
-        if (!cancelled) setIosShareStatus("unavailable");
-      });
-    return () => { cancelled = true; };
-  }, [shareVideo, beginIosShareFileLoad]);
 
   useEffect(() => {
     if (!shouldPoll) return undefined;
@@ -1087,33 +1032,6 @@ export function PreviewPage() {
       show("Video is not ready yet");
       return;
     }
-    if (isAppleTouchDevice() && canAttemptFileShare()) {
-      try {
-        const file = await beginIosShareFileLoad(v);
-        if (canShareVideoFile(file)) {
-          show("Choose Save Video to add it to Photos");
-          await navigator.share({
-            files: [file],
-            title: v.title || "Videogen render",
-          });
-          show("Share completed");
-          return;
-        }
-        show("This video format cannot be shared to Photos here");
-      } catch (error) {
-        if (error?.name === "AbortError") {
-          show("Share cancelled");
-          return;
-        }
-        const cached = shareFileRef.current;
-        if (error?.name === "NotAllowedError" && cached?.src === v.src) {
-          show("Video prepared. Tap Save to Photos again.");
-          return;
-        }
-        console.warn("iOS video share failed", error);
-        show("Opening normal download");
-      }
-    }
     downloadVideoLink(v.src, videoFileName(v));
     show("Download started");
   };
@@ -1147,12 +1065,12 @@ export function PreviewPage() {
           <Icon name="arrowLeft" size={14}/> Back to gallery
         </button>
         <div className="preview-actions">
-          <button className="btn" onClick={onCopyLink}><Icon name="copy" size={14}/> Copy link</button>
           <button className="btn" onClick={onTemplate}><Icon name="copy" size={14}/> Use as template</button>
           <button className="btn" onClick={onDownload} disabled={!v.src}>
-            <Icon name="download" size={14}/> {isAppleTouchDevice() ? (iosShareStatus === "preparing" ? "Preparing" : "Save to Photos") : "Download"}
+            <Icon name="download" size={14}/> {isAppleTouchDevice() ? "Save to Photos" : "Download"}
           </button>
-          <button className="btn" onClick={onDelete} title="Delete"><Icon name="trash" size={14}/></button>
+          <button className="btn btn-icon" onClick={onCopyLink} title="Copy link" aria-label="Copy link"><Icon name="copy" size={14}/></button>
+          <button className="btn btn-icon" onClick={onDelete} title="Delete" aria-label="Delete"><Icon name="trash" size={14}/></button>
         </div>
       </header>
 
@@ -1166,24 +1084,28 @@ export function PreviewPage() {
             <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>Title</div>
             <h1 className="display" style={{ fontSize: 28, margin: 0, lineHeight: 1.15 }}>{v.title}</h1>
           </div>
-          <div>
-            <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 8 }}>Prompt</div>
-            <p style={{ fontSize: 13, lineHeight: 1.55, margin: 0, color: "var(--fg-2)" }}>{v.prompt}</p>
-          </div>
-          <div className="surface" style={{ padding: 16 }}>
-            <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 12 }}>Parameters</div>
-            <Spec rows={[
-              ["status", v.status || "ready"],
-              ...(v.taskId ? [["task", v.taskId.slice(0, 22)]] : []),
-              ["mode", modeLabel(v.mode)],
-              ["resolution", v.resolution],
-              ["aspect", v.aspect],
-              ["duration", v.duration + "s · 24fps"],
-              ["camera", v.camera],
-              ["seed", v.seed],
-              ["created", fmtDate(v.createdAt) + " · " + relTime(v.createdAt)],
-            ]}/>
-          </div>
+          <details className="surface preview-fold">
+            <summary>Prompt</summary>
+            <div className="preview-fold-body">
+              <p style={{ fontSize: 13, lineHeight: 1.55, margin: 0, color: "var(--fg-2)" }}>{v.prompt}</p>
+            </div>
+          </details>
+          <details className="surface preview-fold">
+            <summary>Parameters</summary>
+            <div className="preview-fold-body">
+              <Spec rows={[
+                ["status", v.status || "ready"],
+                ...(v.taskId ? [["task", v.taskId.slice(0, 22)]] : []),
+                ["mode", modeLabel(v.mode)],
+                ["resolution", v.resolution],
+                ["aspect", v.aspect],
+                ["duration", v.duration + "s · 24fps"],
+                ["camera", v.camera],
+                ["seed", v.seed],
+                ["created", fmtDate(v.createdAt) + " · " + relTime(v.createdAt)],
+              ]}/>
+            </div>
+          </details>
           {(() => {
             const ref = state.images.find((i) => i.id === v.imageId);
             const sceneFrameSrc = v.mode === "ref2v" ? null : ref?.src || v.referenceImageUrl;

@@ -22,11 +22,11 @@ The server owns Ark task state and persists it under `DATA_DIR`.
 - `DATA_DIR/public/covers/` stores first-frame JPG covers extracted from cached videos, served at `/media/covers/...`.
 - `MAX_ARTIFACT_BYTES=524288000` caps the video artifact cache size.
 - `IMAGE_REPO_BASE_URL=https://image.zaynjarvis.com`, `IMAGE_REPO_UPLOAD_KEY` (falls back to `MCP_TOKEN`), and `IMAGE_REPO_TAG=studio` send Studio image uploads to imagerepo instead of hosting them under `/media/inputs`.
-- `ARK_TITLE_MODEL=ep-20260512155127-ngn88` calls Ark `/responses` with the same `ARK_API_KEY` to generate concise task titles. If the title call fails or times out, the server falls back to the prompt.
+- `ARK_TITLE_MODEL=ep-20260512155127-ngn88` calls Ark `/responses` with the same `ARK_API_KEY` to generate concise VLM task titles from the first frame/reference images when present. If the title call fails or times out, the server keeps an untitled placeholder instead of using the prompt prefix.
 - `TASK_MONITOR_MODE=poll` keeps polling Ark in the background.
 - `TASK_MONITOR_MODE=webhook` sends `callback_url` on task creation and accepts Ark callbacks at `/api/ark/webhook`.
 - In webhook mode set `PUBLIC_BASE_URL` or `ARK_CALLBACK_BASE_URL` to the public app origin. If `ARK_WEBHOOK_TOKEN` is set, the token is appended to the callback URL and verified on receipt.
-- `POST /api/images` and the MCP `upload_image` tool accept a JPEG/PNG/WEBP data URL, upload it to imagerepo with `tag=studio`, and return the imagerepo URL. Library uploads and Create-page frame/reference uploads use this endpoint before submitting a video task.
+- `GET /api/images` lists imagerepo images with `tag=studio`; `POST /api/images` and the MCP `upload_image` tool accept a JPEG/PNG/WEBP data URL, upload it to imagerepo with `tag=studio`, and return the imagerepo URL. Library uploads and Create-page frame/reference uploads use this endpoint before submitting a video task.
 
 ## AIGC storyboard workflow
 

@@ -1,11 +1,57 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './components';
+import { OpenVikingBlogArticle } from './zoukEmbed/OpenVikingBlogArticle';
 
 const DEFAULT_SERVER_URL = import.meta.env.VITE_ZOUK_SERVER_URL || 'https://zouk.zaynjarvis.com';
 const DEFAULT_WORKSPACE_ID = import.meta.env.VITE_ZOUK_WORKSPACE_ID || 'default';
 const DEFAULT_CHANNEL = (import.meta.env.VITE_ZOUK_CHANNEL || 'all').replace(/^#/, '');
 const DEFAULT_GUEST_PICTURE = import.meta.env.VITE_ZOUK_GUEST_PICTURE || '';
 const DEFAULT_GUEST_GRAVATAR_URL = import.meta.env.VITE_ZOUK_GUEST_GRAVATAR_URL || '';
+const STORAGE_KEYS = {
+  serverUrl: 'zouk.embed.serverUrl',
+  workspaceId: 'zouk.embed.workspaceId',
+  channel: 'zouk.embed.channel',
+  guestName: 'zouk.embed.name',
+  browserId: 'zouk.embed.browserId',
+};
+
+function readStored(key, fallback) {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable in private browsing.
+  }
+}
+
+function createBrowserId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function getBrowserId() {
+  const existing = readStored(STORAGE_KEYS.browserId, '');
+  if (existing) return existing;
+  const next = createBrowserId();
+  writeStored(STORAGE_KEYS.browserId, next);
+  return next;
+}
+
+function guestNameForBrowser(browserId) {
+  const suffix = String(browserId || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toLowerCase() || 'guest';
+  return `studio-reader-${suffix}`;
+}
+
+function px(value) {
+  return `${Math.max(0, Math.round(value))}px`;
+}
 
 function wsUrlFor(serverUrl, token, workspaceId) {
   const url = new URL('/ws', serverUrl);
@@ -54,25 +100,28 @@ function compactSelection(text) {
   return text.trim().replace(/\s+/g, ' ').slice(0, 900);
 }
 
-function sourceDraft(sourceUrl, selectedText = '') {
+function sourceContext(sourceUrl, selectedText = '') {
   const parts = [`Source: ${sourceUrl}`];
   if (selectedText) {
     parts.push(`Selected text:\n"${compactSelection(selectedText)}"`);
   }
-  return `${parts.join('\n\n')}\n\n`;
+  return parts.join('\n\n');
 }
 
-function withSourcePrefix(content, sourceUrl) {
+function withSourcePrefix(content, sourceUrl, selectedText = '') {
   const trimmed = content.trim();
   if (/^source:\s*/i.test(trimmed)) return trimmed;
-  return `${sourceDraft(sourceUrl).trim()}\n\n${trimmed}`;
+  return `${sourceContext(sourceUrl, selectedText)}\n\n${trimmed}`;
 }
 
-function canSendComposer(content, sourceUrl) {
+function canSendComposer(content) {
   const trimmed = content.trim();
   if (!trimmed) return false;
-  if (trimmed === sourceDraft(sourceUrl).trim()) return false;
   return true;
+}
+
+function visibleMessageContent(content) {
+  return String(content || '').replace(/^Source:[^\n]*(?:\n\nSelected text:\n"[\s\S]*?")?\n\n/, '');
 }
 
 function avatarInitial(name) {
@@ -104,16 +153,18 @@ function Avatar({ avatar, name, agent = false }) {
 }
 
 export function ZoukEmbedPage() {
-  const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
-  const [workspaceId, setWorkspaceId] = useState(DEFAULT_WORKSPACE_ID);
-  const [channel, setChannel] = useState(DEFAULT_CHANNEL);
-  const [guestName, setGuestName] = useState(() => localStorage.getItem('zouk.embed.name') || 'studio-reader');
+  const [browserId] = useState(getBrowserId);
+  const [serverUrl, setServerUrl] = useState(() => readStored(STORAGE_KEYS.serverUrl, DEFAULT_SERVER_URL));
+  const [workspaceId, setWorkspaceId] = useState(() => readStored(STORAGE_KEYS.workspaceId, DEFAULT_WORKSPACE_ID));
+  const [channel, setChannel] = useState(() => readStored(STORAGE_KEYS.channel, DEFAULT_CHANNEL));
+  const [guestName, setGuestName] = useState(() => readStored(STORAGE_KEYS.guestName, guestNameForBrowser(getBrowserId())));
   const [token, setToken] = useState('');
   const [userName, setUserName] = useState('');
   const [selfAvatar, setSelfAvatar] = useState(null);
   const [avatarMap, setAvatarMap] = useState({});
   const [messages, setMessages] = useState([]);
   const [composer, setComposer] = useState('');
+  const [selectedText, setSelectedText] = useState('');
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
   const [chatOpen, setChatOpen] = useState(false);
@@ -147,6 +198,11 @@ export function ZoukEmbedPage() {
   );
   const showChat = chatOpen || sheetClosing || isDesktop;
 
+  useEffect(() => writeStored(STORAGE_KEYS.serverUrl, serverUrl), [serverUrl]);
+  useEffect(() => writeStored(STORAGE_KEYS.workspaceId, workspaceId), [workspaceId]);
+  useEffect(() => writeStored(STORAGE_KEYS.channel, channel.replace(/^#/, '') || 'all'), [channel]);
+  useEffect(() => writeStored(STORAGE_KEYS.guestName, guestName), [guestName]);
+
   const rememberSource = useCallback(() => {
     const next = currentSourceUrl();
     setSourceUrl(next);
@@ -154,15 +210,16 @@ export function ZoukEmbedPage() {
   }, []);
 
   const openChat = useCallback((selectedText = '') => {
-    const nextSourceUrl = rememberSource();
+    rememberSource();
     if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
     setSheetClosing(false);
     setSheetDragY(0);
     setChatOpen(true);
     setSelectionAction(null);
+    setSelectedText(compactSelection(selectedText));
     setComposer((prev) => {
-      if (prev.trim() && !selectedText) return prev;
-      return sourceDraft(nextSourceUrl, selectedText);
+      if (prev.trim()) return prev;
+      return '';
     });
     window.setTimeout(() => textareaRef.current?.focus(), 80);
   }, [rememberSource]);
@@ -262,11 +319,11 @@ export function ZoukEmbedPage() {
   }, [serverUrl, target, token, workspaceId]);
 
   const connect = useCallback(async () => {
-    const cleanName = guestName.trim() || 'studio-reader';
+    const cleanName = guestName.trim() || guestNameForBrowser(browserId);
     setStatus('connecting');
     setError('');
     try {
-      localStorage.setItem('zouk.embed.name', cleanName);
+      writeStored(STORAGE_KEYS.guestName, cleanName);
       const res = await fetch(`${serverUrl}/api/auth/embed-guest-session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -274,6 +331,7 @@ export function ZoukEmbedPage() {
           workspaceId,
           channel: channel.replace(/^#/, '') || 'all',
           name: cleanName,
+          browserId,
           ...avatarPayloadFromStorage(),
         }),
       });
@@ -296,7 +354,7 @@ export function ZoukEmbedPage() {
       setStatus('error');
       setError(err instanceof Error ? err.message : 'Unable to connect');
     }
-  }, [channel, guestName, loadHistory, serverUrl, workspaceId]);
+  }, [browserId, channel, guestName, loadHistory, serverUrl, workspaceId]);
 
   useEffect(() => {
     if (!showChat || token || status === 'connecting' || status === 'error') return;
@@ -365,7 +423,57 @@ export function ZoukEmbedPage() {
   useEffect(() => {
     const lock = showChat && !isDesktop;
     document.body.classList.toggle('zouk-embed-sheet-open', lock);
-    return () => document.body.classList.remove('zouk-embed-sheet-open');
+    if (!lock) return () => document.body.classList.remove('zouk-embed-sheet-open');
+
+    const root = document.documentElement;
+    const body = document.body;
+    const scrollY = window.scrollY;
+    const previous = {
+      position: body.style.position,
+      top: body.style.top,
+      left: body.style.left,
+      right: body.style.right,
+      width: body.style.width,
+    };
+    let raf = 0;
+    const syncViewport = () => {
+      raf = 0;
+      const viewport = window.visualViewport;
+      root.style.setProperty('--zouk-sheet-vv-top', px(viewport?.offsetTop ?? 0));
+      root.style.setProperty('--zouk-sheet-vv-height', px(viewport?.height ?? window.innerHeight));
+    };
+    const scheduleViewport = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(syncViewport);
+    };
+
+    body.style.position = 'fixed';
+    body.style.top = `-${scrollY}px`;
+    body.style.left = '0';
+    body.style.right = '0';
+    body.style.width = '100%';
+    root.style.setProperty('--zouk-sheet-scroll-y', px(scrollY));
+    syncViewport();
+    window.addEventListener('resize', scheduleViewport, { passive: true });
+    window.visualViewport?.addEventListener('resize', scheduleViewport, { passive: true });
+    window.visualViewport?.addEventListener('scroll', scheduleViewport, { passive: true });
+
+    return () => {
+      document.body.classList.remove('zouk-embed-sheet-open');
+      window.removeEventListener('resize', scheduleViewport);
+      window.visualViewport?.removeEventListener('resize', scheduleViewport);
+      window.visualViewport?.removeEventListener('scroll', scheduleViewport);
+      if (raf) cancelAnimationFrame(raf);
+      root.style.removeProperty('--zouk-sheet-vv-top');
+      root.style.removeProperty('--zouk-sheet-vv-height');
+      root.style.removeProperty('--zouk-sheet-scroll-y');
+      body.style.position = previous.position;
+      body.style.top = previous.top;
+      body.style.left = previous.left;
+      body.style.right = previous.right;
+      body.style.width = previous.width;
+      window.scrollTo(0, scrollY);
+    };
   }, [isDesktop, showChat]);
 
   useEffect(() => () => {
@@ -374,8 +482,8 @@ export function ZoukEmbedPage() {
 
   const send = async (e) => {
     e.preventDefault();
-    const content = withSourcePrefix(composer, sourceUrl);
-    if (!canSendComposer(composer, sourceUrl) || !token || status === 'sending') return;
+    const content = withSourcePrefix(composer, sourceUrl, selectedText);
+    if (!canSendComposer(composer) || !token || status === 'sending') return;
     setStatus('sending');
     setError('');
     try {
@@ -386,7 +494,9 @@ export function ZoukEmbedPage() {
       });
       const body = await parseJsonResponse(res);
       setMessages(prev => mergeMessage(prev, normalizeMessage(body.message)));
-      setComposer(sourceDraft(rememberSource()));
+      rememberSource();
+      setSelectedText('');
+      setComposer('');
       setStatus('connected');
     } catch (err) {
       setStatus('error');
@@ -395,86 +505,17 @@ export function ZoukEmbedPage() {
   };
 
   const hasSession = !!token;
-  const online = hasSession && (status === 'connected' || status === 'sending');
-  const channelName = channel.replace(/^#/, '') || 'all';
 
   return (
     <div className="zouk-blog-page">
-      <header className="zouk-blog-bar">
-        <strong>OpenViking Blog</strong>
-        <button className="zouk-menu-button" type="button" aria-label="Open menu">
-          <span />
-          <span />
-          <span />
-        </button>
-      </header>
-
-      <main
-        className="zouk-article"
-        ref={articleRef}
+      <OpenVikingBlogArticle
+        articleRef={articleRef}
+        selectionAction={selectionAction}
+        showSelectionAsk={!!selectionAction && (!chatOpen || isDesktop)}
+        onAskSelection={openChat}
         onMouseUp={() => window.setTimeout(updateSelectionAction, 0)}
         onTouchEnd={() => window.setTimeout(updateSelectionAction, 120)}
-      >
-        <div className="zouk-breadcrumb">Blog / Context Database</div>
-        <h1 className="zouk-article-title">Break Free from Context Chaos</h1>
-        <p className="zouk-lede">
-          OpenViking is an open-source context database designed from the ground up for AI agents.
-        </p>
-        <button className="zouk-inline-ask" type="button" onClick={() => openChat()}>
-          <Icon name="message" size={15} />
-          Ask Zouk about this page
-        </button>
-        <div className="zouk-article-card" aria-hidden="true">
-          <div>
-            <span>viking://</span>
-            <strong>memory / resources / skills</strong>
-          </div>
-        </div>
-        <div className="zouk-article-body">
-          <p className="zouk-quote">
-            "We are swimming in a sea of information, and we need to learn to navigate."
-          </p>
-          <p>
-            AI agents are moving beyond short chats into long-running work, tool use, and collaborative workflows. Their context is now scattered across code, vector stores, documents, and ad hoc skill systems, making it difficult to maintain and debug.
-          </p>
-          <p>
-            OpenViking treats that problem as a database problem. It organizes memory, resources, and skills through a file-system paradigm so an agent can navigate context with stable paths instead of relying only on flat semantic chunks.
-          </p>
-          <h2>The core idea</h2>
-          <p>
-            Every piece of context maps to a URI under the <code>viking://</code> protocol. Agents can browse, locate, and retrieve context through a directory tree, then load only the amount of detail needed for the current step.
-          </p>
-          <ul>
-            <li><strong>File-system organization</strong> keeps memory, resources, and skills in one navigable structure.</li>
-            <li><strong>L0/L1/L2 context layers</strong> let agents plan with summaries and fetch details on demand.</li>
-            <li><strong>Recursive retrieval</strong> combines directory navigation with semantic search for higher precision.</li>
-            <li><strong>Retrieval tracing</strong> makes the agent's context path observable and easier to debug.</li>
-            <li><strong>Session management</strong> turns conversations and tool usage into long-term memory.</li>
-          </ul>
-          <h2>Why it matters</h2>
-          <p>
-            Basic RAG often slices information into isolated fragments. That can work for narrow lookup tasks, but it loses structure when an agent needs to reason across files, decisions, skills, and past sessions.
-          </p>
-          <p>
-            The OpenViking approach gives agents a persistent context layer that compounds over time. As models become more interchangeable, the accumulated memory and resource graph become the durable asset.
-          </p>
-          <p>
-            This page is wired to a scoped Zouk conversation for end-to-end testing: selecting text or pressing the chat button opens the same channel, and each outgoing question begins with the current page URL as the source.
-          </p>
-        </div>
-      </main>
-
-      {selectionAction && (!chatOpen || isDesktop) && (
-        <button
-          className="zouk-selection-ask"
-          type="button"
-          style={{ top: selectionAction.top, left: selectionAction.left }}
-          onClick={() => openChat(selectionAction.text)}
-        >
-          <Icon name="message" size={13} />
-          Ask Zouk
-        </button>
-      )}
+      />
 
       {!showChat && (
         <button className="zouk-launcher" type="button" onClick={() => openChat()}>
@@ -502,27 +543,9 @@ export function ZoukEmbedPage() {
           >
             <div className="zouk-sheet-handle" />
           </div>
-          <div className="zouk-chat-top">
-            <div>
-              <h2>Ask Zouk</h2>
-              <span>#{channelName}</span>
-            </div>
-            <div className="zouk-top-actions">
-              <span className={'zouk-status ' + (online ? 'ok' : status === 'error' ? 'bad' : '')}>
-                {online ? 'online' : status}
-              </span>
-              <button className="zouk-close" type="button" onClick={closeChat} aria-label="Collapse chat">
-                <Icon name="x" size={15} />
-              </button>
-            </div>
-          </div>
 
           {!hasSession ? (
             <div className="zouk-sheet-scroll">
-              <div className="zouk-source-card">
-                <span>Source</span>
-                <strong>{sourceUrl}</strong>
-              </div>
               <div className="zouk-connect">
                 <div className="zouk-connect-title">
                   <span className={status === 'connecting' ? 'spinner' : ''} />
@@ -555,10 +578,6 @@ export function ZoukEmbedPage() {
             </div>
           ) : (
             <>
-              <div className="zouk-source-card">
-                <span>Source</span>
-                <strong>{sourceUrl}</strong>
-              </div>
               <div className="zouk-messages" ref={scrollRef}>
                 {visibleMessages.length === 0 ? (
                   <div className="zouk-empty">No channel messages yet.</div>
@@ -583,7 +602,7 @@ export function ZoukEmbedPage() {
                             <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
                           </div>
                         )}
-                        <div className="zouk-message-body">{message.content}</div>
+                        <div className="zouk-message-body">{visibleMessageContent(message.content)}</div>
                       </div>
                     </div>
                   );
@@ -602,7 +621,7 @@ export function ZoukEmbedPage() {
                   }}
                   placeholder="Ask a follow-up..."
                 />
-                <button className="btn btn-primary btn-icon" disabled={!canSendComposer(composer, sourceUrl) || status === 'sending'} title="Send">
+                <button className="btn btn-primary btn-icon" disabled={!canSendComposer(composer) || status === 'sending'} title="Send">
                   <Icon name={status === 'sending' ? 'refresh' : 'share'} size={14} className={status === 'sending' ? 'spin-ic' : undefined} />
                 </button>
               </form>

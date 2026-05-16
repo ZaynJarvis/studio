@@ -14,6 +14,7 @@ button:disabled{cursor:not-allowed;opacity:.56}
 input,textarea,select{font-family:inherit;color:inherit;font-size:16px}
 a{color:inherit;text-decoration:none}
 ::selection{background:var(--accent);color:var(--accent-fg)}
+body.zouk-embed-sheet-open{overflow:hidden}
 
 /* ─────────── Theme: STUDIO — cinema noir / editorial film ─────────── */
 [data-theme="studio"]{
@@ -466,9 +467,34 @@ a{color:inherit;text-decoration:none}
   border:1px solid rgba(40,41,47,.08);
   border-radius:18px;
   background:
-    linear-gradient(135deg,rgba(255,255,255,.76),rgba(255,255,255,.3)),
-    linear-gradient(145deg,#d9c7ac,#eef3f3 46%,#455264);
+    radial-gradient(circle at 16% 20%,rgba(69,160,129,.34),transparent 29%),
+    radial-gradient(circle at 82% 24%,rgba(65,96,149,.34),transparent 26%),
+    linear-gradient(145deg,#f6f0df,#e8f1ea 44%,#233142);
   box-shadow:0 24px 54px rgba(39,42,48,.16);
+  display:flex;
+  align-items:flex-end;
+  overflow:hidden;
+}
+.zouk-article-card div{
+  width:100%;
+  padding:20px;
+  color:#f6fbff;
+  background:linear-gradient(180deg,transparent,rgba(18,24,32,.78));
+}
+.zouk-article-card span{
+  display:block;
+  margin-bottom:5px;
+  font-family:var(--font-mono);
+  font-size:12px;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:#9ee0c2;
+}
+.zouk-article-card strong{
+  display:block;
+  font-size:20px;
+  line-height:1.2;
+  letter-spacing:0;
 }
 .zouk-article-body{
   max-width:620px;
@@ -477,6 +503,33 @@ a{color:inherit;text-decoration:none}
   line-height:1.8;
 }
 .zouk-article-body p{margin:0 0 20px}
+.zouk-article-body h2{
+  margin:30px 0 12px;
+  color:#33383c;
+  font-size:20px;
+  line-height:1.25;
+  letter-spacing:0;
+}
+.zouk-article-body ul{
+  margin:0 0 22px;
+  padding-left:22px;
+}
+.zouk-article-body li{margin:0 0 10px}
+.zouk-article-body code{
+  padding:2px 5px;
+  border:1px solid rgba(40,41,47,.12);
+  border-radius:6px;
+  background:rgba(255,255,255,.58);
+  color:#214f45;
+  font-family:var(--font-mono);
+  font-size:.92em;
+}
+.zouk-quote{
+  color:#30343a;
+  font-size:18px;
+  line-height:1.55;
+  font-weight:700;
+}
 .zouk-selection-ask{
   position:fixed;
   transform:translateX(-50%);
@@ -510,6 +563,7 @@ a{color:inherit;text-decoration:none}
   font-weight:800;
 }
 .zouk-chat-dialog{
+  --zouk-sheet-drag:0px;
   position:sticky;
   top:0;
   right:auto;
@@ -532,12 +586,22 @@ a{color:inherit;text-decoration:none}
   border-radius:0;
   box-shadow:-24px 0 60px rgba(10,14,20,.18);
 }
+.zouk-sheet-drag-zone{
+  height:22px;
+  flex:0 0 22px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  touch-action:none;
+  cursor:grab;
+}
+.zouk-sheet-drag-zone:active{cursor:grabbing}
 .zouk-sheet-handle{
   width:54px;
   height:4px;
   border-radius:999px;
   background:rgba(213,222,238,.38);
-  margin:13px auto 4px;
+  margin:0 auto;
   flex:0 0 auto;
 }
 .zouk-chat-top{
@@ -639,6 +703,15 @@ a{color:inherit;text-decoration:none}
   font-weight:800;
 }
 .zouk-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.zouk-sheet-scroll{
+  flex:1;
+  min-height:0;
+  overflow:auto;
+  padding:0 0 calc(16px + env(safe-area-inset-bottom,0px));
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
+  touch-action:pan-y;
+}
 .zouk-messages{
   flex:1;
   min-height:0;
@@ -647,6 +720,9 @@ a{color:inherit;text-decoration:none}
   display:flex;
   flex-direction:column;
   gap:12px;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
+  touch-action:pan-y;
 }
 .zouk-empty{
   margin:auto;
@@ -838,7 +914,14 @@ a{color:inherit;text-decoration:none}
     border-right:0;
     border-bottom:0;
     border-radius:22px 22px 0 0;
+    max-height:calc(100svh - 12px);
+    transform:translate3d(0,var(--zouk-sheet-drag),0);
+    transition:transform 180ms cubic-bezier(.2,.8,.2,1);
+    animation:zoukSheetEnter 220ms cubic-bezier(.2,.8,.2,1);
+    will-change:transform;
   }
+  .zouk-chat-dialog.dragging{transition:none}
+  .zouk-chat-dialog.closing{transform:translate3d(0,105%,0)}
   .zouk-two{grid-template-columns:1fr}
   .drop.no-drag{
     min-height:48px!important;padding:12px 14px!important;
@@ -852,4 +935,9 @@ a{color:inherit;text-decoration:none}
   }
   .preview-actions{justify-content:flex-start}
   .seg{width:100%}
+}
+
+@keyframes zoukSheetEnter{
+  from{transform:translate3d(0,105%,0)}
+  to{transform:translate3d(0,var(--zouk-sheet-drag),0)}
 }

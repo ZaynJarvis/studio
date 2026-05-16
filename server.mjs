@@ -34,7 +34,9 @@ const arkApiKey = process.env.ARK_API_KEY || "";
 const arkBaseUrl = (process.env.ARK_API_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3").replace(/\/+$/, "");
 const arkParamStyle = process.env.ARK_PARAM_STYLE || "inline";
 const arkTitleModel = process.env.ARK_TITLE_MODEL || "ep-20260512155127-ngn88";
-const arkTitleTimeoutMs = Number(process.env.ARK_TITLE_TIMEOUT_MS || 6000);
+const arkTitleTimeoutMs = Number(process.env.ARK_TITLE_TIMEOUT_MS || 20000);
+const arkTitleImageFetchTimeoutMs = Number(process.env.ARK_TITLE_IMAGE_FETCH_TIMEOUT_MS || 8000);
+const arkTitleMaxImageBytes = Number(process.env.ARK_TITLE_MAX_IMAGE_BYTES || 5 * 1024 * 1024);
 const monitorMode = process.env.TASK_MONITOR_MODE === "webhook" ? "webhook" : "poll";
 const callbackBaseUrl = (process.env.ARK_CALLBACK_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || process.env.ARK_CALLBACK_BASE_URL || "").replace(/\/+$/, "");
@@ -122,6 +124,13 @@ for (const task of tasks.values()) {
   }
   if (task.status === "succeeded" && task.artifactPath && !task.coverUrl) {
     scheduleCoverGeneration(task.id, "startup");
+  }
+  if (shouldRefreshGeneratedTitle(task)) {
+    scheduleBackgroundTimer(() => {
+      trackBackgroundJob(updateTaskTitle(task.id, inputFromTask(task)).catch((error) => {
+        console.warn(`startup title refresh failed ${task.id}`, publicError(error));
+      }));
+    }, 3000);
   }
 }
 saveTasks();
@@ -293,6 +302,18 @@ function titleFromPrompt(prompt) {
   return limitTitle((raw.split(/[.,;\n，。；]/)[0] || "Untitled take").trim());
 }
 
+function shouldRefreshGeneratedTitle(task) {
+  const title = String(task?.title || "").trim().toLowerCase();
+  if (title !== "untitled take") return false;
+
+  const hasImages = Boolean(task.inputImageUrl || task.lastFrameImageUrl)
+    || normalizeUrlList(task.referenceImageUrls || task.referenceImageUrl).length > 0;
+  if (!hasImages) return false;
+
+  const createdAt = Number(task.createdAt || 0);
+  return !createdAt || Date.now() - createdAt < 7 * 24 * 60 * 60 * 1000;
+}
+
 function cleanGeneratedTitle(text, fallback) {
   return limitTitle(text, limitTitle(fallback));
 }
@@ -303,6 +324,44 @@ function titleImageUrls(input) {
     input.lastFrameImageUrl,
     ...normalizeUrlList(input.referenceImageUrls),
   ]).slice(0, 4);
+}
+
+function mimeFromImageUrl(url) {
+  const ext = extname(new URL(url, "https://local.invalid").pathname).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".gif") return "image/gif";
+  return "image/jpeg";
+}
+
+async function titleImageDataUrl(imageUrl, signal = undefined) {
+  const raw = String(imageUrl || "").trim();
+  if (!raw || raw.startsWith("data:")) return raw;
+  if (!/^https?:\/\//i.test(raw)) return raw;
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const timeout = setTimeout(() => controller.abort(), arkTitleImageFetchTimeoutMs);
+  timeout.unref?.();
+
+  try {
+    const response = await fetch(raw, { signal: controller.signal });
+    if (!response.ok) return raw;
+
+    const contentType = String(response.headers.get("content-type") || mimeFromImageUrl(raw)).split(";")[0].trim() || "image/jpeg";
+    if (!contentType.startsWith("image/")) return raw;
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length || buffer.length > arkTitleMaxImageBytes) return raw;
+    return `data:${contentType};base64,${buffer.toString("base64")}`;
+  } catch (error) {
+    console.warn("title image fetch failed", publicError(error));
+    return raw;
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abort);
+  }
 }
 
 function extractResponseText(raw) {
@@ -343,26 +402,30 @@ async function generateTaskTitle(input, signal = undefined) {
   const fallback = "Untitled take";
   if (!arkTitleModel) return fallback;
 
-  const images = titleImageUrls(input);
-  const content = images.map((imageUrl) => ({ type: "input_image", image_url: imageUrl }));
-  content.push({
-    type: "input_text",
-    text: [
-      "Create a short production title for this video generation task using the attached visual reference(s) first.",
-      "Return only the title, no quotes, no prefix, and do not copy or truncate the prompt.",
-      "If the prompt is Chinese, use Chinese and keep it 4 to 10 characters. Otherwise use English and keep it 2 to 5 words.",
-      images.length ? "Base the title on visible subject, setting, action, or mood from the image(s)." : "No image is attached, so infer a concise visual title from the prompt.",
-      `Video prompt: ${input.prompt}`,
-    ].join("\n"),
-  });
-
   const controller = new AbortController();
   const abortTitle = () => controller.abort();
   signal?.addEventListener("abort", abortTitle, { once: true });
   const timeout = setTimeout(() => controller.abort(), arkTitleTimeoutMs);
   timeout.unref?.();
 
-  try {
+  const createTitle = async (imageUrls) => {
+    const content = [{
+      type: "input_text",
+      text: [
+        "Create a short production title for this video generation task.",
+        imageUrls.length
+          ? "Use the attached image(s) as the primary source; base the title on visible subject, setting, action, or mood."
+          : "No image is attached, so infer a concise visual title from the prompt without copying it.",
+        "Return only the title, no quotes, no prefix, and do not copy or truncate the prompt.",
+        "If the prompt is Chinese, use Chinese and keep it 4 to 10 characters. Otherwise use English and keep it 2 to 5 words.",
+        `Video prompt: ${input.prompt}`,
+      ].join("\n"),
+    }];
+
+    for (const imageUrl of imageUrls) {
+      content.push({ type: "input_image", image_url: imageUrl, detail: "low" });
+    }
+
     const raw = await arkFetch("/responses", {
       method: "POST",
       signal: controller.signal,
@@ -372,6 +435,17 @@ async function generateTaskTitle(input, signal = undefined) {
       }),
     });
     return cleanGeneratedTitle(extractResponseText(raw), fallback);
+  };
+
+  try {
+    const imageUrls = await Promise.all(titleImageUrls(input).map((url) => titleImageDataUrl(url, controller.signal)));
+    try {
+      return await createTitle(imageUrls);
+    } catch (error) {
+      if (!imageUrls.length || controller.signal.aborted) throw error;
+      console.warn("vlm title generation failed; retrying text-only", publicError(error));
+      return await createTitle([]);
+    }
   } catch (error) {
     console.warn("title generation failed", publicError(error));
     return fallback;

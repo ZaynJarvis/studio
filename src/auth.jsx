@@ -98,7 +98,7 @@ export function AuthGate({ children }) {
     return (
       <div className="auth-screen">
         <form className="auth-card surface" onSubmit={submit}>
-          <div className="auth-eyebrow mono">VIDEOGEN STUDIO &middot; ACCESS</div>
+          <div className="auth-eyebrow mono">ACCESS</div>
           <h1 className="display auth-title">Sign in to continue</h1>
           <p className="auth-sub">This deck is gated. Paste your access token to unlock.</p>
           <label className="label" htmlFor="auth-token">Access token</label>

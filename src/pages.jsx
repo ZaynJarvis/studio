@@ -5,14 +5,11 @@ import { authHeader, clearToken, getToken } from './auth';
 import { prepareUploadImage } from './imageUpload';
 
 const HOST_PARAMS = {
-  resolutions: ["720p", "1080p", "2K"],
+  resolutions: ["720p", "1080p"],
   aspects: ["16:9", "9:16", "1:1"],
   durationMin: 5,
   durationMax: 15,
   cameras: ["fixed", "dynamic"],
-  models: [
-    { id: "seedance-pro", label: "2.0 Pro", note: "highest quality · up to 2K · multi-shot" },
-  ],
 };
 
 const INPUT_MODES = [
@@ -339,10 +336,6 @@ export function Nav({ route, navigate }) {
 
   return (
     <nav className="nav">
-      <div className="nav-brand">
-        <span className="dot"></span>
-        <span>VIDEOGEN<small>STUDIO · DECK 02</small></span>
-      </div>
       <div className="nav-section">Workspace</div>
       <div className="nav-items">
         {items.map((it) => (
@@ -355,17 +348,6 @@ export function Nav({ route, navigate }) {
           </button>
         ))}
       </div>
-      <div style={{ flex: 1 }}></div>
-      <div style={{ position: "relative", marginTop: "auto", padding: "12px 8px 0" }}>
-        <div className="btn" style={{ width: "100%", justifyContent: "flex-start", cursor: "default" }}>
-          <Icon name="key" size={14}/>
-          <span style={{ flex: 1, textAlign: "left" }}>Ark key</span>
-          <span className="mono" style={{
-            fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase",
-            color: "var(--good)",
-          }}>● server</span>
-        </div>
-      </div>
     </nav>
   );
 }
@@ -377,7 +359,7 @@ function SectionHeader({ title, sub, count }) {
         <h2 className="display" style={{ fontSize: 26, margin: 0 }}>{title}</h2>
         {count != null && <span className="mono muted-2" style={{ fontSize: 11, letterSpacing: ".14em" }}>{String(count).padStart(2,"0")}</span>}
       </div>
-      <span className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase" }}>{sub}</span>
+      {sub && <span className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase" }}>{sub}</span>}
     </div>
   );
 }
@@ -401,8 +383,6 @@ function VideoCard({ v, onClick, onTemplate, onDelete }) {
       <div className="video-meta">
         <h3 className="video-title">{v.title}</h3>
         <div className="video-sub">
-          <span>{v.model.replace("seedance-", "")}</span>
-          <span>·</span>
           <span>{v.aspect}</span>
           <span>·</span>
           <span>{relTime(v.createdAt)}</span>
@@ -422,53 +402,6 @@ function VideoCard({ v, onClick, onTemplate, onDelete }) {
         </div>
       </div>
     </article>
-  );
-}
-
-function PendingEmptyState({ onCreate }) {
-  return (
-    <div className="queue-empty">
-      <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", marginBottom: 8 }}>
-        No pending tasks
-      </div>
-      <p style={{ margin: "0 0 14px", color: "var(--fg-2)", lineHeight: 1.55 }}>
-        New renders appear here immediately after submission. You can close the tab; the server keeps the task record and this list reloads from `/api/tasks`.
-      </p>
-      <button className="btn btn-primary" onClick={onCreate}>
-        <Icon name="plus" size={14}/> New render
-      </button>
-    </div>
-  );
-}
-
-function PendingTaskList({ videos, navigate, onTemplate, onDelete }) {
-  const activeVideos = videos.filter((v) => isActiveTask(v.status));
-
-  return (
-    <>
-      <SectionHeader title="Pending Tasks" sub="server-saved renders · safe after refresh" count={activeVideos.length} />
-      <div className="queue-note">
-        <span className={activeVideos.length ? "spinner" : "queue-dot"} />
-        <span>{activeVideos.length
-          ? `${activeVideos.length} active render${activeVideos.length > 1 ? "s" : ""}. Open a card for its persistent preview page.`
-          : "No rendering tasks right now. New submissions will appear here while the server waits for results."}</span>
-      </div>
-      {activeVideos.length > 0 ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
-          {activeVideos.map((v) => (
-            <VideoCard
-              key={v.id}
-              v={v}
-              onClick={() => navigate("/preview", { id: v.id })}
-              onTemplate={() => onTemplate(v)}
-              onDelete={() => onDelete(v)}
-            />
-          ))}
-        </div>
-      ) : (
-        <PendingEmptyState onCreate={() => navigate("/create")} />
-      )}
-    </>
   );
 }
 
@@ -497,43 +430,33 @@ export function HomePage() {
   return (
     <div>
       {node}
-      <section className="home-hero">
-        <div className="mono" style={{ fontSize: 10, letterSpacing: ".24em", color: "var(--accent)", textTransform: "uppercase", marginBottom: 22, display: "flex", alignItems: "center", gap: 10 }}>
-          <span>REEL 14/26</span>
-          <span style={{ width: 14, height: 1, background: "var(--accent)" }}></span>
-          <span>SEEDANCE · BAY 02</span>
-        </div>
-        <h1 className="display" style={{ fontSize: "min(82px,8vw)", margin: 0 }}>
-          Tonight&rsquo;s shoot:<br/>
-          <em style={{ color: "var(--fg-2)" }}>your next shot.</em>
-        </h1>
-        <p style={{ fontSize: 15, lineHeight: 1.55, color: "var(--fg-2)", maxWidth: 540, margin: "20px 0 28px" }}>
-          Start from a scene frame or write the shot fresh. Every previous take is on the wall &mdash; click one to roll a variation.
-        </p>
-        <div className="hero-actions">
-          <button className="btn btn-primary btn-lg" onClick={() => navigate("/create")}>
-            <Icon name="plus" size={14}/> Roll new take
-          </button>
-          <button className="btn btn-lg" onClick={() => navigate("/library")}>
-            <Icon name="grid" size={14}/> Asset locker
-          </button>
-        </div>
-
-        <div className="hero-stats">
-          <div>BAY · 02</div>
-          <div>FPS · 24</div>
-          <div>STOCK · {videos.length.toString().padStart(2, "0")} TAKES</div>
-          <div>TASKS · {activeVideos.length.toString().padStart(2, "0")} ACTIVE</div>
-          <div style={{ color: activeVideos.length ? "var(--accent)" : "var(--accent-2)" }}>● {activeVideos.length ? "RENDERING" : "REC READY"}</div>
-        </div>
+      <section className="home-actions">
+        <button className="btn btn-primary btn-lg" onClick={() => navigate("/create")}>
+          <Icon name="plus" size={14}/> Add
+        </button>
       </section>
 
       <section className="page-section compact">
-        <PendingTaskList videos={videos} navigate={navigate} onTemplate={applyTemplate} onDelete={deleteVideo} />
+        <SectionHeader title="Running" count={activeVideos.length} />
+        {activeVideos.length > 0 ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
+            {activeVideos.map((v) => (
+              <VideoCard
+                key={v.id}
+                v={v}
+                onClick={() => navigate("/preview", { id: v.id })}
+                onTemplate={() => applyTemplate(v)}
+                onDelete={() => deleteVideo(v)}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="queue-empty">No running</div>
+        )}
       </section>
 
       <section className="page-section">
-        <SectionHeader title="Dailies" sub="recent finished takes · click to revisit · grab as template" count={readyVideos.length} />
+        <SectionHeader title="Done" count={readyVideos.length} />
         {readyVideos.length > 0 ? (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 20 }}>
             {readyVideos.map((v) => (
@@ -547,14 +470,7 @@ export function HomePage() {
             ))}
           </div>
         ) : (
-          <div className="queue-empty">
-            <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", marginBottom: 8 }}>
-              No finished takes
-            </div>
-            <p style={{ margin: 0, color: "var(--fg-2)", lineHeight: 1.55 }}>
-              Completed renders will land here with their first-frame cover as soon as Ark returns the video.
-            </p>
-          </div>
+          <div className="queue-empty">No done</div>
         )}
       </section>
     </div>
@@ -605,25 +521,59 @@ function DurationSlider({ value, onChange, min, max }) {
   );
 }
 
+function usePhoneView() {
+  const [phone, setPhone] = useState(() => (
+    typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches
+  ));
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const query = window.matchMedia("(max-width: 760px)");
+    const update = () => setPhone(query.matches);
+    update();
+    query.addEventListener?.("change", update);
+    return () => query.removeEventListener?.("change", update);
+  }, []);
+
+  return phone;
+}
+
+function SelectedImagePreview({ image, label, onClear }) {
+  if (!image) return null;
+  return (
+    <div className="selected-image-preview">
+      <img src={image.src} alt="" />
+      <div className="selected-image-meta">
+        <span className="mono">{label}</span>
+        <strong>{image.name || "image"}</strong>
+      </div>
+      <button className="btn btn-icon" onClick={onClear} title="Remove">
+        <Icon name="x" size={13}/>
+      </button>
+    </div>
+  );
+}
+
 export function CreatePage() {
   const { state, addImage, updateImage, addVideo } = useStore();
   const route = useHashRoute();
   const { navigate, query } = route;
+  const phoneView = usePhoneView();
 
   const tmpl = useMemo(() => state.videos.find((v) => v.id === query.from), [query.from, state.videos]);
   const imageFromRoute = useMemo(() => state.images.find((img) => img.id === query.fromImage), [query.fromImage, state.images]);
+  const model = "seedance-pro";
 
   const [prompt, setPrompt] = useState(tmpl ? tmpl.prompt : "");
-  const [model, setModel] = useState(tmpl ? tmpl.model : "seedance-pro");
   const [resolution, setResolution] = useState(tmpl ? tmpl.resolution : "1080p");
-  const [aspect, setAspect] = useState(tmpl ? tmpl.aspect : "16:9");
-  const [duration, setDuration] = useState(tmpl ? tmpl.duration : 5);
+  const [aspect, setAspect] = useState(tmpl ? tmpl.aspect : "9:16");
+  const [duration, setDuration] = useState(tmpl ? tmpl.duration : 15);
   const [camera, setCamera] = useState(tmpl ? tmpl.camera : "dynamic");
   const [seed, setSeed] = useState(() => (tmpl ? tmpl.seed : Math.floor(Math.random() * 99999)));
-  const [image, setImage] = useState(imageFromRoute || null);
+  const [image, setImage] = useState(tmpl?.mode === "i2v" ? imageFromRoute || null : null);
   const [lastFrame, setLastFrame] = useState(null);
-  const [referenceImages, setReferenceImages] = useState([]);
-  const [inputMode, setInputMode] = useState(() => imageFromRoute ? "frames" : tmpl?.mode === "ref2v" ? "references" : tmpl?.mode === "i2v" ? "frames" : "text");
+  const [referenceImages, setReferenceImages] = useState(() => imageFromRoute ? [imageFromRoute] : []);
+  const [inputMode, setInputMode] = useState(() => tmpl?.mode === "i2v" ? "frames" : "references");
   const mode = inputMode === "frames" && image
     ? "i2v"
     : inputMode === "references" && referenceImages.length
@@ -683,26 +633,33 @@ export function CreatePage() {
 
   const libraryStrip = (onSelect, selected = []) => {
     const selectedIds = new Set(selected.filter(Boolean).map((img) => img.id || img.src));
-    const available = state.images.filter((img) => !selectedIds.has(img.id || img.src)).slice(0, 10);
-    if (!available.length) return null;
+    const items = state.images.slice(0, 10);
+    if (!items.length) return null;
     return (
       <div style={{ marginTop: 14 }}>
         <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", marginBottom: 8 }}>
           Reuse from library
         </div>
         <div className="scroll-x" style={{ display: "flex", gap: 8, paddingBottom: 4 }}>
-          {available.map((img) => (
+          {items.map((img) => {
+            const selectedAlready = selectedIds.has(img.id || img.src);
+            return (
             <button key={img.id}
-              onClick={() => onSelect(img)}
+              disabled={selectedAlready}
+              onClick={() => !selectedAlready && onSelect(img)}
+              title={selectedAlready ? "Selected" : img.name}
               style={{
                 width: 64, height: 64, padding: 0,
                 border: "1px solid var(--line)", borderRadius: "var(--radius)",
                 background: "transparent", overflow: "hidden", flexShrink: 0,
-                cursor: "pointer",
+                cursor: selectedAlready ? "default" : "pointer",
+                opacity: selectedAlready ? .36 : 1,
+                filter: selectedAlready ? "grayscale(1)" : "none",
               }}>
               <img src={img.src} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
             </button>
-          ))}
+            );
+          })}
         </div>
       </div>
     );
@@ -799,15 +756,17 @@ export function CreatePage() {
                   <label className="label">
                     First frame · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>actual opening scene</em>
                   </label>
-                  <DropZone compact onFile={onPickFile} image={image} onClear={() => setImage(null)} hint={"Drop an actual first frame for I→V"} />
-                  {!image && libraryStrip(onPickFile, [image, lastFrame])}
+                  <DropZone compact onFile={onPickFile} image={null} onClear={() => setImage(null)} allowDrag={!phoneView} hint={phoneView ? "Tap to choose first frame" : "Drop or choose first frame"} />
+                  <SelectedImagePreview image={image} label="First frame" onClear={() => setImage(null)} />
+                  {libraryStrip(onPickFile, [image, lastFrame])}
                 </div>
                 <div>
                   <label className="label">
                     Last frame · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>optional final scene</em>
                   </label>
-                  <DropZone compact onFile={onPickLastFrame} image={lastFrame} onClear={() => setLastFrame(null)} hint={"Drop an optional last frame"} />
-                  {!lastFrame && libraryStrip(onPickLastFrame, [image, lastFrame])}
+                  <DropZone compact onFile={onPickLastFrame} image={null} onClear={() => setLastFrame(null)} allowDrag={!phoneView} hint={phoneView ? "Tap to choose last frame" : "Drop or choose last frame"} />
+                  <SelectedImagePreview image={lastFrame} label="Last frame" onClear={() => setLastFrame(null)} />
+                  {libraryStrip(onPickLastFrame, [image, lastFrame])}
                 </div>
               </div>
             )}
@@ -817,11 +776,11 @@ export function CreatePage() {
                 <label className="label">
                   Reference images · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>identity and story references</em>
                 </label>
-                <DropZone compact onFile={onPickReference} image={null} hint={"Drop a character or story reference image"} />
+                <DropZone compact onFile={onPickReference} image={null} allowDrag={!phoneView} hint={phoneView ? "Tap to choose reference" : "Drop or choose reference"} />
                 {referenceImages.length > 0 && (
-                  <div className="scroll-x" style={{ display: "flex", gap: 10, marginTop: 12, paddingBottom: 4 }}>
+                  <div className="selected-image-grid">
                     {referenceImages.map((img) => (
-                      <div key={img.id || img.src} className="img-tile" style={{ width: 92, height: 70, flexShrink: 0, position: "relative" }}>
+                      <div key={img.id || img.src} className="img-tile selected-reference-tile">
                         <img src={img.src} alt="" />
                         <button className="btn btn-icon"
                           onClick={() => setReferenceImages((items) => items.filter((item) => item !== img))}
@@ -851,7 +810,7 @@ export function CreatePage() {
                   : "Describe the shot: subject, environment, motion, lens, mood, lighting..."}
               style={{ minHeight: 140 }}
             />
-            <div className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".1em", marginTop: 6, display: "flex", justifyContent: "space-between" }}>
+            <div className="mono muted-2 prompt-helper">
               <span>Be specific: subject · motion · lens · lighting · mood</span>
               <span>{prompt.length} chars</span>
             </div>
@@ -864,25 +823,7 @@ export function CreatePage() {
             {modeLabel(mode)} · {inputMode}
           </div>
 
-          <ParamRow label="Model">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
-              {HOST_PARAMS.models.map((m) => (
-                <button key={m.id}
-                  className={"surface"}
-                  onClick={() => setModel(m.id)}
-                  style={{
-                    padding: "10px 12px", textAlign: "left", cursor: "pointer",
-                    borderColor: model === m.id ? "var(--accent)" : "var(--line)",
-                    background: model === m.id ? "color-mix(in oklab,var(--accent) 8%,var(--bg-2))" : undefined,
-                  }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>Seedance {m.label}</div>
-                  <div className="mono muted-2" style={{ fontSize: 10, marginTop: 3, letterSpacing: ".06em" }}>{m.note}</div>
-                </button>
-              ))}
-            </div>
-          </ParamRow>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <div className="param-grid">
             <ParamRow label="Resolution">
               <div className="seg">
                 {HOST_PARAMS.resolutions.map((r) => (
@@ -1234,7 +1175,6 @@ export function PreviewPage() {
             <Spec rows={[
               ["status", v.status || "ready"],
               ...(v.taskId ? [["task", v.taskId.slice(0, 22)]] : []),
-              ["model", v.model],
               ["mode", modeLabel(v.mode)],
               ["resolution", v.resolution],
               ["aspect", v.aspect],
@@ -1299,6 +1239,7 @@ export function PreviewPage() {
 export function LibraryPage() {
   const { state, removeImage, removeVideo, addImage } = useStore();
   const { navigate } = useHashRoute();
+  const phoneView = usePhoneView();
   const [tab, setTab] = useState("images");
   const [search, setSearch] = useState("");
   const { show, node } = useToast();
@@ -1312,7 +1253,6 @@ export function LibraryPage() {
       v.title,
       v.prompt,
       v.status,
-      v.model,
       v.aspect,
       v.resolution,
     ].join(" ").toLowerCase().includes(q));
@@ -1369,9 +1309,11 @@ export function LibraryPage() {
             <input ref={inputRef} type="file" accept="image/*" multiple
                    style={{ display: "none" }}
                    onChange={(e) => onUpload(e.target.files)} />
-            <span className="mono muted-2" style={{ fontSize: 11, letterSpacing: ".1em", alignSelf: "center" }}>
-              Drag any tile onto Create to use as a scene frame
-            </span>
+            {!phoneView && (
+              <span className="mono muted-2" style={{ fontSize: 11, letterSpacing: ".1em", alignSelf: "center" }}>
+                Drag any tile onto Create to use as a scene frame
+              </span>
+            )}
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))", gap: 14 }}>
             {state.images.length === 0 && (
@@ -1381,8 +1323,9 @@ export function LibraryPage() {
             )}
             {state.images.map((img) => (
               <div key={img.id} className="img-tile"
-                draggable
+                draggable={!phoneView}
                 onDragStart={(e) => {
+                  if (phoneView) return;
                   e.dataTransfer.setData("application/x-vgs-image", JSON.stringify(img));
                 }}
                 onClick={() => navigate("/create", { fromImage: img.id })}

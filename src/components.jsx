@@ -23,7 +23,7 @@ export function Icon({ name, size = 16, ...rest }) {
   );
 }
 
-export function DropZone({ onFile, image, onClear, hint = "Drop image, or click to browse", accept = "image/*", compact = false }) {
+export function DropZone({ onFile, image, onClear, hint = "Drop image, or click to browse", accept = "image/*", compact = false, allowDrag = true }) {
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef(null);
@@ -43,12 +43,17 @@ export function DropZone({ onFile, image, onClear, hint = "Drop image, or click 
   };
   return (
     <div
-      className={"drop" + (over ? " over" : "")}
+      className={"drop" + (over ? " over" : "") + (!allowDrag ? " no-drag" : "")}
       onClick={() => !busy && !image && inputRef.current?.click()}
-      onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (!allowDrag) return;
+        setOver(true);
+      }}
       onDragLeave={() => setOver(false)}
       onDrop={async (e) => {
         e.preventDefault(); setOver(false);
+        if (!allowDrag) return;
         const data = e.dataTransfer.getData("application/x-vgs-image");
         if (data) {
           try {
@@ -87,7 +92,7 @@ export function DropZone({ onFile, image, onClear, hint = "Drop image, or click 
           <Icon name="upload" size={32} className={"drop-icon" + (busy ? " spin-ic" : "")} />
           <div style={{ fontSize: 14, fontWeight: 500 }}>{busy ? "Uploading image" : hint}</div>
           <div className="mono muted-2" style={{ fontSize: 11, letterSpacing: ".06em" }}>
-            JPEG &middot; PNG &middot; WEBP &middot; up to 10 MB
+            {allowDrag ? "JPEG · PNG · WEBP · up to 10 MB" : "JPEG · PNG · WEBP"}
           </div>
           <input
             ref={inputRef} type="file" accept={accept}

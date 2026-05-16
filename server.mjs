@@ -440,7 +440,10 @@ async function generateTaskTitle(input, signal = undefined) {
   try {
     const imageUrls = await Promise.all(titleImageUrls(input).map((url) => titleImageDataUrl(url, controller.signal)));
     try {
-      return await createTitle(imageUrls);
+      const title = await createTitle(imageUrls);
+      if (title !== fallback || !imageUrls.length) return title;
+      console.warn("vlm title generation returned no title; retrying text-only");
+      return await createTitle([]);
     } catch (error) {
       if (!imageUrls.length || controller.signal.aborted) throw error;
       console.warn("vlm title generation failed; retrying text-only", publicError(error));

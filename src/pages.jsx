@@ -384,6 +384,7 @@ export function Nav({ route, navigate }) {
     { path: "/", icon: "home", label: "Home", kbd: "1" },
     { path: "/create", icon: "sparkle", label: "Create", kbd: "2" },
     { path: "/library", icon: "grid", label: "Library", kbd: "3" },
+    { path: "/zouk", icon: "message", label: "Zouk", kbd: "4" },
   ];
 
   return (

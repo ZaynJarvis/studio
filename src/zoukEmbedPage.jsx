@@ -221,8 +221,8 @@ export function ZoukEmbedPage() {
       if (prev.trim()) return prev;
       return '';
     });
-    window.setTimeout(() => textareaRef.current?.focus(), 80);
-  }, [rememberSource]);
+    if (isDesktop) window.setTimeout(() => textareaRef.current?.focus(), 80);
+  }, [isDesktop, rememberSource]);
 
   const closeChat = useCallback(() => {
     if (isDesktop) return;
@@ -439,8 +439,10 @@ export function ZoukEmbedPage() {
     const syncViewport = () => {
       raf = 0;
       const viewport = window.visualViewport;
+      const viewportHeight = viewport?.height ?? window.innerHeight;
       root.style.setProperty('--zouk-sheet-vv-top', px(viewport?.offsetTop ?? 0));
-      root.style.setProperty('--zouk-sheet-vv-height', px(viewport?.height ?? window.innerHeight));
+      root.style.setProperty('--zouk-sheet-vv-height', px(viewportHeight));
+      root.style.setProperty('--zouk-sheet-height', px(viewportHeight * 0.4));
     };
     const scheduleViewport = () => {
       if (raf) return;
@@ -450,10 +452,9 @@ export function ZoukEmbedPage() {
     body.style.position = 'fixed';
     body.style.top = `-${scrollY}px`;
     body.style.left = '0';
-    body.style.right = '0';
-    body.style.width = '100%';
-    root.style.setProperty('--zouk-sheet-scroll-y', px(scrollY));
-    syncViewport();
+      body.style.right = '0';
+      body.style.width = '100%';
+      syncViewport();
     window.addEventListener('resize', scheduleViewport, { passive: true });
     window.visualViewport?.addEventListener('resize', scheduleViewport, { passive: true });
     window.visualViewport?.addEventListener('scroll', scheduleViewport, { passive: true });
@@ -466,7 +467,7 @@ export function ZoukEmbedPage() {
       if (raf) cancelAnimationFrame(raf);
       root.style.removeProperty('--zouk-sheet-vv-top');
       root.style.removeProperty('--zouk-sheet-vv-height');
-      root.style.removeProperty('--zouk-sheet-scroll-y');
+      root.style.removeProperty('--zouk-sheet-height');
       body.style.position = previous.position;
       body.style.top = previous.top;
       body.style.left = previous.left;
@@ -507,7 +508,7 @@ export function ZoukEmbedPage() {
   const hasSession = !!token;
 
   return (
-    <div className="zouk-blog-page">
+    <div className="zouk-blog-page" data-theme="washi">
       <OpenVikingBlogArticle
         articleRef={articleRef}
         selectionAction={selectionAction}

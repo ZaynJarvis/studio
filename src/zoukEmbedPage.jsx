@@ -184,6 +184,7 @@ export function ZoukEmbedPage() {
   const scrollRef = useRef(null);
   const dragRef = useRef(null);
   const closeTimerRef = useRef(null);
+  const sheetHeightRef = useRef(0);
 
   const target = useMemo(() => `#${channel.replace(/^#/, '') || 'all'}`, [channel]);
   const authHeaders = useMemo(() => ({
@@ -421,46 +422,36 @@ export function ZoukEmbedPage() {
   }, []);
 
   useEffect(() => {
-    const lock = showChat && !isDesktop;
-    document.body.classList.toggle('zouk-embed-sheet-open', lock);
-    if (!lock) return () => document.body.classList.remove('zouk-embed-sheet-open');
+    if (!showChat || isDesktop) return undefined;
 
     const root = document.documentElement;
-    const body = document.body;
-    const scrollY = window.scrollY;
-    const previous = {
-      position: body.style.position,
-      top: body.style.top,
-      left: body.style.left,
-      right: body.style.right,
-      width: body.style.width,
-    };
     let raf = 0;
+    const layoutHeight = Math.max(
+      document.documentElement.clientHeight || 0,
+      window.innerHeight || 0,
+      window.visualViewport?.height || 0,
+    );
+    sheetHeightRef.current = layoutHeight * 0.5;
+    root.style.setProperty('--zouk-sheet-height', px(sheetHeightRef.current));
+
     const syncViewport = () => {
       raf = 0;
       const viewport = window.visualViewport;
       const viewportHeight = viewport?.height ?? window.innerHeight;
       root.style.setProperty('--zouk-sheet-vv-top', px(viewport?.offsetTop ?? 0));
       root.style.setProperty('--zouk-sheet-vv-height', px(viewportHeight));
-      root.style.setProperty('--zouk-sheet-height', px(viewportHeight * 0.4));
     };
     const scheduleViewport = () => {
       if (raf) return;
       raf = requestAnimationFrame(syncViewport);
     };
 
-    body.style.position = 'fixed';
-    body.style.top = `-${scrollY}px`;
-    body.style.left = '0';
-      body.style.right = '0';
-      body.style.width = '100%';
-      syncViewport();
+    syncViewport();
     window.addEventListener('resize', scheduleViewport, { passive: true });
     window.visualViewport?.addEventListener('resize', scheduleViewport, { passive: true });
     window.visualViewport?.addEventListener('scroll', scheduleViewport, { passive: true });
 
     return () => {
-      document.body.classList.remove('zouk-embed-sheet-open');
       window.removeEventListener('resize', scheduleViewport);
       window.visualViewport?.removeEventListener('resize', scheduleViewport);
       window.visualViewport?.removeEventListener('scroll', scheduleViewport);
@@ -468,12 +459,6 @@ export function ZoukEmbedPage() {
       root.style.removeProperty('--zouk-sheet-vv-top');
       root.style.removeProperty('--zouk-sheet-vv-height');
       root.style.removeProperty('--zouk-sheet-height');
-      body.style.position = previous.position;
-      body.style.top = previous.top;
-      body.style.left = previous.left;
-      body.style.right = previous.right;
-      body.style.width = previous.width;
-      window.scrollTo(0, scrollY);
     };
   }, [isDesktop, showChat]);
 
@@ -620,9 +605,10 @@ export function ZoukEmbedPage() {
                       send(event);
                     }
                   }}
+                  enterKeyHint="send"
                   placeholder="Ask a follow-up..."
                 />
-                <button className="btn btn-primary btn-icon" disabled={!canSendComposer(composer) || status === 'sending'} title="Send">
+                <button className="btn btn-primary btn-icon zouk-composer-send" disabled={!canSendComposer(composer) || status === 'sending'} title="Send">
                   <Icon name={status === 'sending' ? 'refresh' : 'share'} size={14} className={status === 'sending' ? 'spin-ic' : undefined} />
                 </button>
               </form>

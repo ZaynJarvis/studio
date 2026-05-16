@@ -117,6 +117,9 @@ export function ZoukEmbedPage() {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
   const [chatOpen, setChatOpen] = useState(false);
+  const [sheetClosing, setSheetClosing] = useState(false);
+  const [sheetDragging, setSheetDragging] = useState(false);
+  const [sheetDragY, setSheetDragY] = useState(0);
   const [isDesktop, setIsDesktop] = useState(() => (
     typeof window !== 'undefined'
       ? window.matchMedia('(min-width: 761px)').matches
@@ -128,6 +131,8 @@ export function ZoukEmbedPage() {
   const textareaRef = useRef(null);
   const wsRef = useRef(null);
   const scrollRef = useRef(null);
+  const dragRef = useRef(null);
+  const closeTimerRef = useRef(null);
 
   const target = useMemo(() => `#${channel.replace(/^#/, '') || 'all'}`, [channel]);
   const authHeaders = useMemo(() => ({
@@ -140,7 +145,7 @@ export function ZoukEmbedPage() {
     () => messages.filter((message) => !isSystemMessage(message)),
     [messages],
   );
-  const showChat = chatOpen || isDesktop;
+  const showChat = chatOpen || sheetClosing || isDesktop;
 
   const rememberSource = useCallback(() => {
     const next = currentSourceUrl();
@@ -150,6 +155,9 @@ export function ZoukEmbedPage() {
 
   const openChat = useCallback((selectedText = '') => {
     const nextSourceUrl = rememberSource();
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    setSheetClosing(false);
+    setSheetDragY(0);
     setChatOpen(true);
     setSelectionAction(null);
     setComposer((prev) => {
@@ -158,6 +166,59 @@ export function ZoukEmbedPage() {
     });
     window.setTimeout(() => textareaRef.current?.focus(), 80);
   }, [rememberSource]);
+
+  const closeChat = useCallback(() => {
+    if (isDesktop) return;
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    setSheetDragging(false);
+    setSheetDragY(0);
+    setSheetClosing(true);
+    closeTimerRef.current = window.setTimeout(() => {
+      setChatOpen(false);
+      setSheetClosing(false);
+      closeTimerRef.current = null;
+    }, 210);
+  }, [isDesktop]);
+
+  const startSheetDrag = useCallback((event) => {
+    if (isDesktop || event.button > 0) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      lastY: event.clientY,
+      lastTime: performance.now(),
+      velocity: 0,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setSheetDragging(true);
+    setSheetDragY(0);
+  }, [isDesktop]);
+
+  const moveSheetDrag = useCallback((event) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const now = performance.now();
+    const delta = Math.max(0, event.clientY - drag.startY);
+    const dt = Math.max(1, now - drag.lastTime);
+    drag.velocity = (event.clientY - drag.lastY) / dt;
+    drag.lastY = event.clientY;
+    drag.lastTime = now;
+    setSheetDragY(delta);
+  }, []);
+
+  const endSheetDrag = useCallback((event) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const delta = Math.max(0, event.clientY - drag.startY);
+    const shouldClose = delta > 92 || (delta > 42 && drag.velocity > 0.7);
+    dragRef.current = null;
+    setSheetDragging(false);
+    if (shouldClose) {
+      closeChat();
+    } else {
+      setSheetDragY(0);
+    }
+  }, [closeChat]);
 
   const updateSelectionAction = useCallback(() => {
     const selection = window.getSelection?.();
@@ -301,6 +362,16 @@ export function ZoukEmbedPage() {
     return () => media.removeEventListener('change', update);
   }, []);
 
+  useEffect(() => {
+    const lock = showChat && !isDesktop;
+    document.body.classList.toggle('zouk-embed-sheet-open', lock);
+    return () => document.body.classList.remove('zouk-embed-sheet-open');
+  }, [isDesktop, showChat]);
+
+  useEffect(() => () => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+  }, []);
+
   const send = async (e) => {
     e.preventDefault();
     const content = withSourcePrefix(composer, sourceUrl);
@@ -330,7 +401,7 @@ export function ZoukEmbedPage() {
   return (
     <div className="zouk-blog-page">
       <header className="zouk-blog-bar">
-        <strong>Product Guide</strong>
+        <strong>OpenViking Blog</strong>
         <button className="zouk-menu-button" type="button" aria-label="Open menu">
           <span />
           <span />
@@ -344,25 +415,51 @@ export function ZoukEmbedPage() {
         onMouseUp={() => window.setTimeout(updateSelectionAction, 0)}
         onTouchEnd={() => window.setTimeout(updateSelectionAction, 120)}
       >
-        <div className="zouk-breadcrumb">Guide / Quickstart</div>
-        <h1 className="zouk-article-title">Install the widget</h1>
+        <div className="zouk-breadcrumb">Blog / Context Database</div>
+        <h1 className="zouk-article-title">Break Free from Context Chaos</h1>
         <p className="zouk-lede">
-          Add the script and channel element to any mobile documentation page.
+          OpenViking is an open-source context database designed from the ground up for AI agents.
         </p>
         <button className="zouk-inline-ask" type="button" onClick={() => openChat()}>
           <Icon name="message" size={15} />
           Ask Zouk about this page
         </button>
-        <div className="zouk-article-card" aria-hidden="true" />
+        <div className="zouk-article-card" aria-hidden="true">
+          <div>
+            <span>viking://</span>
+            <strong>memory / resources / skills</strong>
+          </div>
+        </div>
         <div className="zouk-article-body">
-          <p>
-            The host page controls the article and calls Zouk only for a scoped chat session. Readers can ask from the page without receiving broader workspace access.
+          <p className="zouk-quote">
+            "We are swimming in a sea of information, and we need to learn to navigate."
           </p>
           <p>
-            Selecting text opens the same chat with the selected passage placed in the draft. The source URL is included before the question so the channel has visible context.
+            AI agents are moving beyond short chats into long-running work, tool use, and collaborative workflows. Their context is now scattered across code, vector stores, documents, and ad hoc skill systems, making it difficult to maintain and debug.
           </p>
           <p>
-            The conversation is shared with the configured Zouk channel, while system messages stay hidden in this embedded view.
+            OpenViking treats that problem as a database problem. It organizes memory, resources, and skills through a file-system paradigm so an agent can navigate context with stable paths instead of relying only on flat semantic chunks.
+          </p>
+          <h2>The core idea</h2>
+          <p>
+            Every piece of context maps to a URI under the <code>viking://</code> protocol. Agents can browse, locate, and retrieve context through a directory tree, then load only the amount of detail needed for the current step.
+          </p>
+          <ul>
+            <li><strong>File-system organization</strong> keeps memory, resources, and skills in one navigable structure.</li>
+            <li><strong>L0/L1/L2 context layers</strong> let agents plan with summaries and fetch details on demand.</li>
+            <li><strong>Recursive retrieval</strong> combines directory navigation with semantic search for higher precision.</li>
+            <li><strong>Retrieval tracing</strong> makes the agent's context path observable and easier to debug.</li>
+            <li><strong>Session management</strong> turns conversations and tool usage into long-term memory.</li>
+          </ul>
+          <h2>Why it matters</h2>
+          <p>
+            Basic RAG often slices information into isolated fragments. That can work for narrow lookup tasks, but it loses structure when an agent needs to reason across files, decisions, skills, and past sessions.
+          </p>
+          <p>
+            The OpenViking approach gives agents a persistent context layer that compounds over time. As models become more interchangeable, the accumulated memory and resource graph become the durable asset.
+          </p>
+          <p>
+            This page is wired to a scoped Zouk conversation for end-to-end testing: selecting text or pressing the chat button opens the same channel, and each outgoing question begins with the current page URL as the source.
           </p>
         </div>
       </main>
@@ -387,8 +484,24 @@ export function ZoukEmbedPage() {
       )}
 
       {showChat && (
-        <aside className="zouk-chat-dialog" aria-label="Zouk chat">
-          <div className="zouk-sheet-handle" />
+        <aside
+          className={
+            'zouk-chat-dialog'
+            + (sheetClosing ? ' closing' : '')
+            + (sheetDragging ? ' dragging' : '')
+          }
+          style={!isDesktop ? { '--zouk-sheet-drag': `${sheetDragY}px` } : undefined}
+          aria-label="Zouk chat"
+        >
+          <div
+            className="zouk-sheet-drag-zone"
+            onPointerDown={startSheetDrag}
+            onPointerMove={moveSheetDrag}
+            onPointerUp={endSheetDrag}
+            onPointerCancel={endSheetDrag}
+          >
+            <div className="zouk-sheet-handle" />
+          </div>
           <div className="zouk-chat-top">
             <div>
               <h2>Ask Zouk</h2>
@@ -398,50 +511,54 @@ export function ZoukEmbedPage() {
               <span className={'zouk-status ' + (online ? 'ok' : status === 'error' ? 'bad' : '')}>
                 {online ? 'online' : status}
               </span>
-              <button className="zouk-close" type="button" onClick={() => setChatOpen(false)} aria-label="Collapse chat">
+              <button className="zouk-close" type="button" onClick={closeChat} aria-label="Collapse chat">
                 <Icon name="x" size={15} />
               </button>
             </div>
           </div>
 
-          <div className="zouk-source-card">
-            <span>Source</span>
-            <strong>{sourceUrl}</strong>
-          </div>
-
-          {!hasSession && (
-            <div className="zouk-connect">
-              <div className="zouk-connect-title">
-                <span className={status === 'connecting' ? 'spinner' : ''} />
-                {status === 'connecting' ? 'Connecting to Zouk...' : 'Connect to Zouk'}
+          {!hasSession ? (
+            <div className="zouk-sheet-scroll">
+              <div className="zouk-source-card">
+                <span>Source</span>
+                <strong>{sourceUrl}</strong>
               </div>
-              {status === 'error' && (
-                <>
-                  <label className="label">Zouk server</label>
-                  <input className="input mono" value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} />
-                  <div className="zouk-two">
-                    <div>
-                      <label className="label">Workspace</label>
-                      <input className="input mono" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} />
+              <div className="zouk-connect">
+                <div className="zouk-connect-title">
+                  <span className={status === 'connecting' ? 'spinner' : ''} />
+                  {status === 'connecting' ? 'Connecting to Zouk...' : 'Connect to Zouk'}
+                </div>
+                {status === 'error' && (
+                  <>
+                    <label className="label">Zouk server</label>
+                    <input className="input mono" value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} />
+                    <div className="zouk-two">
+                      <div>
+                        <label className="label">Workspace</label>
+                        <input className="input mono" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} />
+                      </div>
+                      <div>
+                        <label className="label">Channel</label>
+                        <input className="input mono" value={channel} onChange={(event) => setChannel(event.target.value)} />
+                      </div>
                     </div>
-                    <div>
-                      <label className="label">Channel</label>
-                      <input className="input mono" value={channel} onChange={(event) => setChannel(event.target.value)} />
-                    </div>
-                  </div>
-                  <label className="label">Display name</label>
-                  <input className="input" value={guestName} onChange={(event) => setGuestName(event.target.value)} />
-                </>
-              )}
-              <button className="btn btn-primary" type="button" onClick={connect} disabled={status === 'connecting'}>
-                <Icon name={status === 'connecting' ? 'refresh' : 'message'} size={14} className={status === 'connecting' ? 'spin-ic' : undefined} />
-                {status === 'connecting' ? 'Connecting' : 'Retry'}
-              </button>
+                    <label className="label">Display name</label>
+                    <input className="input" value={guestName} onChange={(event) => setGuestName(event.target.value)} />
+                  </>
+                )}
+                <button className="btn btn-primary" type="button" onClick={connect} disabled={status === 'connecting'}>
+                  <Icon name={status === 'connecting' ? 'refresh' : 'message'} size={14} className={status === 'connecting' ? 'spin-ic' : undefined} />
+                  {status === 'connecting' ? 'Connecting' : 'Retry'}
+                </button>
+              </div>
+              {error && <div className="zouk-error mono">{error}</div>}
             </div>
-          )}
-
-          {hasSession && (
+          ) : (
             <>
+              <div className="zouk-source-card">
+                <span>Source</span>
+                <strong>{sourceUrl}</strong>
+              </div>
               <div className="zouk-messages" ref={scrollRef}>
                 {visibleMessages.length === 0 ? (
                   <div className="zouk-empty">No channel messages yet.</div>
@@ -489,10 +606,9 @@ export function ZoukEmbedPage() {
                   <Icon name={status === 'sending' ? 'refresh' : 'share'} size={14} className={status === 'sending' ? 'spin-ic' : undefined} />
                 </button>
               </form>
+              {error && <div className="zouk-error mono">{error}</div>}
             </>
           )}
-
-          {error && <div className="zouk-error mono">{error}</div>}
         </aside>
       )}
     </div>

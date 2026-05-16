@@ -614,6 +614,36 @@ export function CreatePage() {
 
   const tmpl = useMemo(() => state.videos.find((v) => v.id === query.from), [query.from, state.videos]);
   const imageFromRoute = useMemo(() => state.images.find((img) => img.id === query.fromImage), [query.fromImage, state.images]);
+  const imageFromUrl = useCallback((src, name = "template image") => {
+    if (!src) return null;
+    const found = state.images.find((img) => [img.src, img.url, img.mediaPath, img.media_path].filter(Boolean).includes(src));
+    if (found) return found;
+    return {
+      id: `template_${src.replace(/[^a-zA-Z0-9]+/g, "_").slice(-48)}`,
+      name,
+      src,
+      url: src,
+      mediaPath: src,
+      cloud: true,
+      addedAt: Date.now(),
+    };
+  }, [state.images]);
+  const templateFirstFrame = useMemo(() => (
+    tmpl?.mode === "i2v" ? imageFromRoute || imageFromUrl(tmpl.referenceImageUrl, "template first frame") : null
+  ), [imageFromRoute, imageFromUrl, tmpl]);
+  const templateLastFrame = useMemo(() => (
+    tmpl?.mode === "i2v" ? imageFromUrl(tmpl.lastFrameUrl, "template last frame") : null
+  ), [imageFromUrl, tmpl]);
+  const templateReferenceImages = useMemo(() => {
+    if (imageFromRoute) return [imageFromRoute];
+    if (tmpl?.mode !== "ref2v") return [];
+    return Array.from(new Set([
+      ...(Array.isArray(tmpl.characterReferenceUrls) ? tmpl.characterReferenceUrls : []),
+      tmpl.characterReferenceUrl,
+    ].filter(Boolean)))
+      .map((src, index) => imageFromUrl(src, `template reference ${index + 1}`))
+      .filter(Boolean);
+  }, [imageFromRoute, imageFromUrl, tmpl]);
   const model = "seedance-pro";
 
   const [prompt, setPrompt] = useState(tmpl ? tmpl.prompt : "");
@@ -622,9 +652,9 @@ export function CreatePage() {
   const [duration, setDuration] = useState(tmpl ? tmpl.duration : 15);
   const [camera, setCamera] = useState(tmpl ? tmpl.camera : "dynamic");
   const [seed, setSeed] = useState(() => (tmpl ? tmpl.seed : Math.floor(Math.random() * 99999)));
-  const [image, setImage] = useState(tmpl?.mode === "i2v" ? imageFromRoute || null : null);
-  const [lastFrame, setLastFrame] = useState(null);
-  const [referenceImages, setReferenceImages] = useState(() => imageFromRoute ? [imageFromRoute] : []);
+  const [image, setImage] = useState(templateFirstFrame);
+  const [lastFrame, setLastFrame] = useState(templateLastFrame);
+  const [referenceImages, setReferenceImages] = useState(templateReferenceImages);
   const [inputMode, setInputMode] = useState(() => tmpl?.mode === "i2v" ? "frames" : "references");
   const mode = inputMode === "frames" && image
     ? "i2v"

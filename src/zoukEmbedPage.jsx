@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './components';
 
-const DEFAULT_SERVER_URL = import.meta.env.VITE_ZOUK_SERVER_URL || 'http://localhost:7777';
+const DEFAULT_SERVER_URL = import.meta.env.VITE_ZOUK_SERVER_URL || 'https://zouk.zaynjarvis.com';
 const DEFAULT_WORKSPACE_ID = import.meta.env.VITE_ZOUK_WORKSPACE_ID || 'default';
 const DEFAULT_CHANNEL = (import.meta.env.VITE_ZOUK_CHANNEL || 'all').replace(/^#/, '');
 

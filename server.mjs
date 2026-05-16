@@ -33,7 +33,9 @@ const publicTasksFile = join(publicDataDir, "tasks.json");
 const arkApiKey = process.env.ARK_API_KEY || "";
 const arkBaseUrl = (process.env.ARK_API_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3").replace(/\/+$/, "");
 const arkParamStyle = process.env.ARK_PARAM_STYLE || "inline";
-const arkTitleModel = process.env.ARK_TITLE_MODEL || "doubao-seed-2-0-pro-260215";
+const configuredArkTitleModel = process.env.ARK_TITLE_MODEL || "";
+const arkTitleModel = process.env.ARK_VLM_TITLE_MODEL
+  || (configuredArkTitleModel && configuredArkTitleModel !== "ep-20260512155127-ngn88" ? configuredArkTitleModel : "doubao-seed-2-0-pro-260215");
 const arkTitleTimeoutMs = Number(process.env.ARK_TITLE_TIMEOUT_MS || 20000);
 const arkTitleImageFetchTimeoutMs = Number(process.env.ARK_TITLE_IMAGE_FETCH_TIMEOUT_MS || 8000);
 const arkTitleMaxImageBytes = Number(process.env.ARK_TITLE_MAX_IMAGE_BYTES || 5 * 1024 * 1024);

@@ -34,8 +34,12 @@ const arkApiKey = process.env.ARK_API_KEY || "";
 const arkBaseUrl = (process.env.ARK_API_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3").replace(/\/+$/, "");
 const arkParamStyle = process.env.ARK_PARAM_STYLE || "inline";
 const configuredArkTitleModel = process.env.ARK_TITLE_MODEL || "";
-const arkTitleModel = process.env.ARK_VLM_TITLE_MODEL
-  || (configuredArkTitleModel && configuredArkTitleModel !== "ep-20260512155127-ngn88" ? configuredArkTitleModel : "doubao-seed-2-0-pro-260215");
+const arkTitleModels = uniqueTitleModels([
+  process.env.ARK_VLM_TITLE_MODEL,
+  configuredArkTitleModel && configuredArkTitleModel !== "ep-20260512155127-ngn88" ? configuredArkTitleModel : "",
+  "doubao-seed-2-0-pro-260215",
+  "doubao-seed-1-6-vision-250815",
+]);
 const arkTitleTimeoutMs = Number(process.env.ARK_TITLE_TIMEOUT_MS || 20000);
 const arkTitleImageFetchTimeoutMs = Number(process.env.ARK_TITLE_IMAGE_FETCH_TIMEOUT_MS || 8000);
 const arkTitleMaxImageBytes = Number(process.env.ARK_TITLE_MAX_IMAGE_BYTES || 5 * 1024 * 1024);
@@ -213,6 +217,18 @@ function normalizeUrlList(value) {
     urls.push(url);
   }
   return urls;
+}
+
+function uniqueTitleModels(values) {
+  const seen = new Set();
+  const models = [];
+  for (const value of values) {
+    const model = String(value || "").trim();
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
+    models.push(model);
+  }
+  return models;
 }
 
 function promptMentionsReferenceAsset(prompt) {
@@ -402,7 +418,7 @@ function extractResponseText(raw) {
 
 async function generateTaskTitle(input, signal = undefined) {
   const fallback = "Untitled take";
-  if (!arkTitleModel) return fallback;
+  if (!arkTitleModels.length) return fallback;
 
   const controller = new AbortController();
   const abortTitle = () => controller.abort();
@@ -410,7 +426,7 @@ async function generateTaskTitle(input, signal = undefined) {
   const timeout = setTimeout(() => controller.abort(), arkTitleTimeoutMs);
   timeout.unref?.();
 
-  const createTitle = async (imageUrls) => {
+  const createTitle = async (model, imageUrls) => {
     const content = [{
       type: "input_text",
       text: [
@@ -432,7 +448,7 @@ async function generateTaskTitle(input, signal = undefined) {
       method: "POST",
       signal: controller.signal,
       body: JSON.stringify({
-        model: arkTitleModel,
+        model,
         input: [{ role: "user", content }],
       }),
     });
@@ -441,16 +457,24 @@ async function generateTaskTitle(input, signal = undefined) {
 
   try {
     const imageUrls = await Promise.all(titleImageUrls(input).map((url) => titleImageDataUrl(url, controller.signal)));
-    try {
-      const title = await createTitle(imageUrls);
-      if (title !== fallback || !imageUrls.length) return title;
-      console.warn("vlm title generation returned no title; retrying text-only");
-      return await createTitle([]);
-    } catch (error) {
-      if (!imageUrls.length || controller.signal.aborted) throw error;
-      console.warn("vlm title generation failed; retrying text-only", publicError(error));
-      return await createTitle([]);
+
+    for (const model of arkTitleModels) {
+      try {
+        if (imageUrls.length) {
+          const title = await createTitle(model, imageUrls);
+          if (title !== fallback) return title;
+          console.warn(`vlm title generation returned no title with ${model}; retrying text-only`);
+        }
+
+        const title = await createTitle(model, []);
+        if (title !== fallback || !imageUrls.length) return title;
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        console.warn(`title generation failed with ${model}`, publicError(error));
+      }
     }
+
+    return fallback;
   } catch (error) {
     console.warn("title generation failed", publicError(error));
     return fallback;

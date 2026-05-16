@@ -805,7 +805,7 @@ export function CreatePage() {
             Bay 02 / New take
           </div>
           <h1 className="display" style={{ fontSize: 40, margin: 0 }}>
-            {tmpl ? "Remix this shot" : "New generation"}
+            {tmpl ? "Remix" : "New generation"}
           </h1>
           {tmpl && (
             <div className="mono muted-2" style={{ fontSize: 11, letterSpacing: ".12em", marginTop: 8, textTransform: "uppercase" }}>
@@ -1038,8 +1038,9 @@ export function PreviewPage() {
   const [taskError, setTaskError] = useState(null);
   const shareFileRef = useRef(null);
   const shareFilePromiseRef = useRef(null);
-  const [shareStatus, setShareStatus] = useState("idle");
+  const [shareState, setShareState] = useState({ src: null, status: "idle" });
   const videoSrc = v?.src;
+  const shareStatus = shareState.src === videoSrc ? shareState.status : "idle";
   const shareVideo = useMemo(() => videoSrc ? {
     id: v?.id,
     taskId: v?.taskId,
@@ -1051,12 +1052,16 @@ export function PreviewPage() {
     videoRef.current = v;
   }, [v]);
 
+  const setShareStatusForVideo = useCallback((src, status) => {
+    setShareState({ src, status });
+  }, []);
+
   const prepareShareFile = useCallback((video) => {
     if (!video?.src) return Promise.reject(new Error("Video is not ready yet"));
     const filename = videoFileName(video);
     const cached = shareFileRef.current;
     if (cached?.src === video.src && cached.filename === filename) {
-      setShareStatus(canShareVideoFile(cached.file) ? "ready" : "unavailable");
+      setShareStatusForVideo(video.src, canShareVideoFile(cached.file) ? "ready" : "unavailable");
       return Promise.resolve(cached.file);
     }
 
@@ -1065,16 +1070,16 @@ export function PreviewPage() {
       return pending.promise;
     }
 
-    setShareStatus("preparing");
+    setShareStatusForVideo(video.src, "preparing");
     let entry = null;
     const promise = fetchVideoFile(video.src, filename)
       .then((file) => {
         shareFileRef.current = { src: video.src, filename, file };
-        setShareStatus(canShareVideoFile(file) ? "ready" : "unavailable");
+        setShareStatusForVideo(video.src, canShareVideoFile(file) ? "ready" : "unavailable");
         return file;
       })
       .catch((error) => {
-        setShareStatus("unavailable");
+        setShareStatusForVideo(video.src, "unavailable");
         throw error;
       })
       .finally(() => {
@@ -1087,12 +1092,11 @@ export function PreviewPage() {
     shareFilePromiseRef.current = entry;
     promise.catch(() => {});
     return promise;
-  }, []);
+  }, [setShareStatusForVideo]);
 
   useEffect(() => {
     shareFileRef.current = null;
     shareFilePromiseRef.current = null;
-    setShareStatus("idle");
   }, [videoSrc]);
 
   useEffect(() => {
@@ -1100,13 +1104,13 @@ export function PreviewPage() {
     let cancelled = false;
     prepareShareFile(shareVideo)
       .then((file) => {
-        if (!cancelled) setShareStatus(canShareVideoFile(file) ? "ready" : "unavailable");
+        if (!cancelled) setShareStatusForVideo(shareVideo.src, canShareVideoFile(file) ? "ready" : "unavailable");
       })
       .catch(() => {
-        if (!cancelled) setShareStatus("unavailable");
+        if (!cancelled) setShareStatusForVideo(shareVideo.src, "unavailable");
       });
     return () => { cancelled = true; };
-  }, [shareVideo, prepareShareFile]);
+  }, [shareVideo, prepareShareFile, setShareStatusForVideo]);
 
   useEffect(() => {
     if (!shouldPoll) return undefined;

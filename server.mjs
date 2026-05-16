@@ -332,8 +332,20 @@ function shouldRefreshGeneratedTitle(task) {
   return !createdAt || Date.now() - createdAt < 7 * 24 * 60 * 60 * 1000;
 }
 
-function cleanGeneratedTitle(text, fallback) {
-  return limitTitle(text, limitTitle(fallback));
+function cleanGeneratedTitle(text) {
+  return limitTitle(text, "");
+}
+
+function titlePromptText(input, hasImages) {
+  return [
+    "Create a short production title for this video generation task.",
+    hasImages
+      ? "Use the attached image(s) as the primary source; base the title on visible subject, setting, action, or mood."
+      : "No image is attached, so infer a concise visual title from the prompt without copying it.",
+    "Return only the title, no quotes, no prefix, and do not copy or truncate the prompt.",
+    "If the prompt is Chinese, use Chinese and keep it 4 to 10 characters. Otherwise use English and keep it 2 to 5 words.",
+    `Video prompt: ${input.prompt}`,
+  ].join("\n");
 }
 
 function titleImageUrls(input) {
@@ -417,7 +429,7 @@ function extractResponseText(raw) {
 }
 
 async function generateTaskTitle(input, signal = undefined) {
-  const fallback = "Untitled take";
+  const fallback = titleFromPrompt(input.prompt);
   if (!arkTitleModels.length) return fallback;
 
   const controller = new AbortController();
@@ -426,22 +438,37 @@ async function generateTaskTitle(input, signal = undefined) {
   const timeout = setTimeout(() => controller.abort(), arkTitleTimeoutMs);
   timeout.unref?.();
 
-  const createTitle = async (model, imageUrls) => {
+  const createTitleWithChat = async (model, imageUrls) => {
     const content = [{
-      type: "input_text",
-      text: [
-        "Create a short production title for this video generation task.",
-        imageUrls.length
-          ? "Use the attached image(s) as the primary source; base the title on visible subject, setting, action, or mood."
-          : "No image is attached, so infer a concise visual title from the prompt without copying it.",
-        "Return only the title, no quotes, no prefix, and do not copy or truncate the prompt.",
-        "If the prompt is Chinese, use Chinese and keep it 4 to 10 characters. Otherwise use English and keep it 2 to 5 words.",
-        `Video prompt: ${input.prompt}`,
-      ].join("\n"),
+      type: "text",
+      text: titlePromptText(input, imageUrls.length > 0),
     }];
 
     for (const imageUrl of imageUrls) {
-      content.push({ type: "input_image", image_url: imageUrl, detail: "low" });
+      content.push({ type: "image_url", image_url: { url: imageUrl } });
+    }
+
+    const raw = await arkFetch("/chat/completions", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content }],
+        max_tokens: 64,
+        temperature: 0.2,
+      }),
+    });
+    return cleanGeneratedTitle(extractResponseText(raw));
+  };
+
+  const createTitleWithResponses = async (model, imageUrls) => {
+    const content = [{
+      type: "input_text",
+      text: titlePromptText(input, imageUrls.length > 0),
+    }];
+
+    for (const imageUrl of imageUrls) {
+      content.push({ type: "input_image", image_url: imageUrl });
     }
 
     const raw = await arkFetch("/responses", {
@@ -450,9 +477,24 @@ async function generateTaskTitle(input, signal = undefined) {
       body: JSON.stringify({
         model,
         input: [{ role: "user", content }],
+        max_output_tokens: 64,
+        temperature: 0.2,
       }),
     });
-    return cleanGeneratedTitle(extractResponseText(raw), fallback);
+    return cleanGeneratedTitle(extractResponseText(raw));
+  };
+
+  const createTitle = async (model, imageUrls) => {
+    try {
+      const title = await createTitleWithChat(model, imageUrls);
+      if (title) return title;
+      console.warn(`vlm title generation returned no title from chat completions with ${model}`);
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      console.warn(`chat title generation failed with ${model}`, publicError(error));
+    }
+
+    return createTitleWithResponses(model, imageUrls);
   };
 
   try {
@@ -462,12 +504,12 @@ async function generateTaskTitle(input, signal = undefined) {
       try {
         if (imageUrls.length) {
           const title = await createTitle(model, imageUrls);
-          if (title !== fallback) return title;
+          if (title) return title;
           console.warn(`vlm title generation returned no title with ${model}; retrying text-only`);
         }
 
         const title = await createTitle(model, []);
-        if (title !== fallback || !imageUrls.length) return title;
+        if (title) return title;
       } catch (error) {
         if (controller.signal.aborted) throw error;
         console.warn(`title generation failed with ${model}`, publicError(error));

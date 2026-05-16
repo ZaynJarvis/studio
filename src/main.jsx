@@ -28,6 +28,10 @@ function App() {
   else if (route.path === "/library") Page = LibraryPage;
   else if (route.path === "/zouk") Page = ZoukEmbedPage;
 
+  if (route.path === "/zouk") {
+    return <Page />;
+  }
+
   return (
     <div className="app">
       <ServerTaskSync />

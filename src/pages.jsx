@@ -800,12 +800,12 @@ export function CreatePage() {
   return (
     <div className="page-shell">
       {node}
-      <header style={{ marginBottom: 28, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16 }}>
+      <header className="create-header">
         <div>
           <div className="mono muted" style={{ fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", marginBottom: 6 }}>
             Bay 02 / New take
           </div>
-          <h1 className="display" style={{ fontSize: 40, margin: 0 }}>
+          <h1 className="display create-title">
             {tmpl ? "Remix" : "New generation"}
           </h1>
           {tmpl && (

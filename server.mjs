@@ -49,7 +49,8 @@ const publicBaseUrl = (process.env.PUBLIC_BASE_URL || process.env.ARK_CALLBACK_B
 const webhookToken = process.env.ARK_WEBHOOK_TOKEN || process.env.WEBHOOK_TOKEN || process.env.MCP_TOKEN || "";
 const webAccessToken = process.env.MCP_TOKEN || "";
 const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
-const maxJsonBodyBytes = Number(process.env.MAX_JSON_BODY_BYTES || Math.ceil(maxImageBytes * 1.5) + 1024 * 1024);
+const maxAudioBytes = Number(process.env.MAX_AUDIO_BYTES || 15 * 1024 * 1024);
+const maxJsonBodyBytes = Number(process.env.MAX_JSON_BODY_BYTES || Math.ceil(Math.max(maxImageBytes, maxAudioBytes) * 1.5) + 1024 * 1024);
 const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1024);
 const imageRepoBaseUrl = (
   process.env.IMAGE_REPO_BASE_URL ||
@@ -98,15 +99,21 @@ mkdirSync(inputsDir, { recursive: true });
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
+  ".aac": "audio/aac",
   ".jpeg": "image/jpeg",
   ".jpg": "image/jpeg",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".m4a": "audio/mp4",
+  ".mp3": "audio/mpeg",
   ".mov": "video/quicktime",
   ".mp4": "video/mp4",
+  ".oga": "audio/ogg",
+  ".ogg": "audio/ogg",
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
+  ".wav": "audio/wav",
   ".webmanifest": "application/manifest+json",
   ".webp": "image/webp",
   ".webm": "video/webm",
@@ -217,6 +224,29 @@ function normalizeUrlList(value) {
     urls.push(url);
   }
   return urls;
+}
+
+function normalizeMediaUrlList(value) {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  const seen = new Set();
+  const urls = [];
+  for (const item of values) {
+    const candidate = typeof item === "object" && item !== null
+      ? item.url || item.src || item.media_url || item.mediaUrl || item.media_path || item.mediaPath || item.audio_url || item.audioUrl
+      : item;
+    const url = String(candidate || "").trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    urls.push(url);
+  }
+  return urls;
+}
+
+function boolFromInput(value) {
+  if (value === true) return true;
+  if (value === false || value == null) return false;
+  const raw = String(value).trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(raw);
 }
 
 function uniqueTitleModels(values) {
@@ -641,6 +671,10 @@ function publicTask(task) {
     character_reference_url: publicMediaUrl(task.referenceImageUrl) || null,
     character_reference_urls: normalizeUrlList(task.referenceImageUrls || task.referenceImageUrl).map((url) => publicMediaUrl(url)),
     character_reference_bytes: task.referenceImageBytes || null,
+    reference_audio_url: publicMediaUrl(task.referenceAudioUrl) || null,
+    reference_audio_urls: normalizeUrlList(task.referenceAudioUrls || task.referenceAudioUrl).map((url) => publicMediaUrl(url)),
+    reference_audio_bytes: task.referenceAudioBytes || null,
+    generate_audio: task.generateAudio !== false,
     reference_image_bytes: task.inputImageBytes || null,
     last_frame_bytes: task.lastFrameImageBytes || null,
     thumb: publicTaskThumbUrl(task),
@@ -678,6 +712,42 @@ function decodeDataImageUrl(value, label = "Image") {
   return { buffer, mime, ext };
 }
 
+function decodeDataAudioUrl(value, label = "Audio") {
+  const match = String(value || "").match(/^data:(audio\/(?:aac|m4a|mpeg|mp3|mp4|ogg|wav|wave|webm|x-wav));base64,([a-zA-Z0-9+/=\s]+)$/i);
+  if (!match) return null;
+
+  const rawMime = match[1].toLowerCase();
+  const mime = rawMime === "audio/mp3"
+    ? "audio/mpeg"
+    : rawMime === "audio/x-wav" || rawMime === "audio/wave"
+      ? "audio/wav"
+      : rawMime === "audio/m4a"
+        ? "audio/mp4"
+        : rawMime;
+  const ext = mime === "audio/aac"
+    ? ".aac"
+    : mime === "audio/mp4"
+      ? ".m4a"
+      : mime === "audio/ogg"
+        ? ".ogg"
+        : mime === "audio/wav"
+          ? ".wav"
+          : mime === "audio/webm"
+            ? ".webm"
+            : ".mp3";
+  const base64 = match[2].replace(/\s+/g, "");
+  const buffer = Buffer.from(base64, "base64");
+
+  if (!buffer.length) {
+    throw httpError(400, "audio_invalid", `${label} data is empty.`);
+  }
+  if (buffer.length > maxAudioBytes) {
+    throw httpError(413, "audio_too_large", `${label} is larger than MAX_AUDIO_BYTES.`);
+  }
+
+  return { buffer, mime, ext };
+}
+
 function persistInputImage(imageUrl, baseUrl = publicBaseUrl, label = "Reference image") {
   if (!imageUrl || !String(imageUrl).startsWith("data:")) return null;
   const decoded = decodeDataImageUrl(imageUrl, label);
@@ -688,6 +758,32 @@ function persistInputImage(imageUrl, baseUrl = publicBaseUrl, label = "Reference
   const mediaBaseUrl = baseUrl || publicBaseUrl;
   if (!mediaBaseUrl) {
     throw httpError(500, "public_base_url_missing", "PUBLIC_BASE_URL or a public request host is required to upload inline images.");
+  }
+
+  const filename = `${randomUUID()}${decoded.ext}`;
+  const finalPath = join(inputsDir, filename);
+  writeFileSync(finalPath, decoded.buffer);
+
+  const mediaPath = `/media/inputs/${filename}`;
+  return {
+    url: publicMediaUrl(mediaPath, mediaBaseUrl),
+    mediaPath,
+    path: `inputs/${filename}`,
+    bytes: decoded.buffer.length,
+    mime: decoded.mime,
+  };
+}
+
+function persistInputAudio(audioUrl, baseUrl = publicBaseUrl, label = "Reference audio") {
+  if (!audioUrl || !String(audioUrl).startsWith("data:")) return null;
+  const decoded = decodeDataAudioUrl(audioUrl, label);
+  if (!decoded) {
+    throw httpError(400, "audio_invalid", `${label} must be an AAC, MP3, MP4/M4A, OGG, WAV, or WEBM audio data URL.`);
+  }
+
+  const mediaBaseUrl = baseUrl || publicBaseUrl;
+  if (!mediaBaseUrl) {
+    throw httpError(500, "public_base_url_missing", "PUBLIC_BASE_URL or a public request host is required to upload inline audio.");
   }
 
   const filename = `${randomUUID()}${decoded.ext}`;
@@ -1078,6 +1174,19 @@ async function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
     ...normalizeUrlList(input.reference_image_url || input.referenceImageUrl || input.character_reference_url || input.characterReferenceUrl),
     ...normalizeUrlList(input.reference_image_urls || input.referenceImageUrls || input.character_reference_urls || input.characterReferenceUrls),
   ]);
+  const rawReferenceAudioUrls = normalizeMediaUrlList([
+    ...normalizeMediaUrlList(input.audio || input.audio_url || input.audioUrl),
+    ...normalizeMediaUrlList(input.audio_urls || input.audioUrls),
+    ...normalizeMediaUrlList(input.reference_audio || input.referenceAudio),
+    ...normalizeMediaUrlList(input.reference_audio_url || input.referenceAudioUrl),
+    ...normalizeMediaUrlList(input.reference_audio_urls || input.referenceAudioUrls),
+    ...normalizeMediaUrlList(input.reference_audios || input.referenceAudios),
+    ...normalizeMediaUrlList(input.reference_media_url || input.referenceMediaUrl),
+    ...normalizeMediaUrlList(input.reference_media_urls || input.referenceMediaUrls),
+  ]);
+  if (rawReferenceAudioUrls.length > 3) {
+    throw httpError(400, "too_many_reference_audios", "Seedance 2.0 supports at most 3 reference audio clips per task.");
+  }
 
   const requestedImageRole = normalizeImageRole(input.image_role || input.imageRole || input.image?.role);
   if (requestedImageRole && requestedImageRole !== "scene_first_frame" && requestedImageRole !== "character_reference") {
@@ -1098,15 +1207,26 @@ async function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
       "For Ark reference-guided generation, pass only reference_image_url and no image_url.",
     ].join(" "));
   }
+  if ((rawImageUrl || rawLastFrameImageUrl) && rawReferenceAudioUrls.length > 0) {
+    throw httpError(400, "reference_audio_requires_reference_mode", [
+      "Seedance audio references are multimodal reference inputs and cannot be mixed with first/last-frame inputs.",
+      "Use reference_image_url(s) with reference_audio_url(s), then ask the prompt to use the reference image as the opening frame if needed.",
+    ].join(" "));
+  }
   const persistedImage = await uploadImageToRepo(rawImageUrl, input.image?.name || input.image_name || input.imageName || "first-frame.jpg", "First frame image");
   const persistedLastFrameImage = await uploadImageToRepo(rawLastFrameImageUrl, input.last_frame_name || input.lastFrameName || "last-frame.jpg", "Last frame image");
   const persistedReferenceImages = await Promise.all(rawReferenceImageUrls.map((url, index) => (
     uploadImageToRepo(url, input.reference_image_names?.[index] || input.referenceImageNames?.[index] || `reference-${index + 1}.jpg`, "Reference image")
   )));
+  const persistedReferenceAudios = rawReferenceAudioUrls.map((url, index) => (
+    persistInputAudio(url, mediaBaseUrl, `Reference audio ${index + 1}`)
+  ));
   const imageUrl = persistedImage?.url || rawImageUrl;
   const lastFrameImageUrl = persistedLastFrameImage?.url || rawLastFrameImageUrl;
   const referenceImageUrls = rawReferenceImageUrls.map((url, index) => persistedReferenceImages[index]?.url || url);
   const storedReferenceImageUrls = rawReferenceImageUrls.map((url, index) => persistedReferenceImages[index]?.mediaPath || referenceImageUrls[index]);
+  const referenceAudioUrls = rawReferenceAudioUrls.map((url, index) => persistedReferenceAudios[index]?.url || url);
+  const storedReferenceAudioUrls = rawReferenceAudioUrls.map((url, index) => persistedReferenceAudios[index]?.mediaPath || referenceAudioUrls[index]);
   const rawThumb = input.thumb || null;
   const safeThumb = String(rawThumb || "").startsWith("data:") ? null : rawThumb;
   const thumb = safeThumb
@@ -1125,6 +1245,9 @@ async function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
   const resolution = normalizeResolution(input.resolution || "1080p");
   const aspect = String(input.aspect_ratio || input.aspect || "16:9");
   const camera = input.camera_fixed === true || input.camera === "fixed" ? "fixed" : "dynamic";
+  const generateAudio = input.generate_audio == null && input.generateAudio == null
+    ? true
+    : boolFromInput(input.generate_audio ?? input.generateAudio);
   const uiModel = "seedance-pro";
   const arkModel = resolveModel();
 
@@ -1145,6 +1268,13 @@ async function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
     referenceImageUrls: storedReferenceImageUrls,
     referenceImageBytes: persistedReferenceImages[0]?.bytes || null,
     referenceImageMimes: persistedReferenceImages.map((item) => item?.mime || null),
+    referenceAudioPath: persistedReferenceAudios[0]?.path || null,
+    referenceAudioPaths: persistedReferenceAudios.map((item) => item?.path || null).filter(Boolean),
+    referenceAudioUrl: storedReferenceAudioUrls[0] || null,
+    referenceAudioUrls: storedReferenceAudioUrls,
+    referenceAudioBytes: persistedReferenceAudios[0]?.bytes || null,
+    referenceAudioMimes: persistedReferenceAudios.map((item) => item?.mime || null),
+    generateAudio,
     imageRole: imageUrl ? "scene_first_frame" : referenceImageUrls.length ? "character_reference" : "none",
     imageId: input.image_id || input.imageId || null,
     thumb,
@@ -1195,11 +1325,19 @@ function toArkBody(input, localTaskId) {
       role: "reference_image",
     });
   }
+  for (const referenceAudioUrl of input.referenceAudioUrls || []) {
+    content.push({
+      type: "audio_url",
+      audio_url: { url: referenceAudioUrl },
+      role: "reference_audio",
+    });
+  }
 
   const body = {
     model: input.arkModel,
     content,
   };
+  body.generate_audio = input.generateAudio !== false;
 
   const callbackUrl = callbackUrlForTask(localTaskId);
   if (callbackUrl) {
@@ -1463,6 +1601,13 @@ async function createVideoTask(rawInput, mediaBaseUrl = publicBaseUrl) {
     referenceImageUrls: input.referenceImageUrls,
     referenceImageBytes: input.referenceImageBytes,
     referenceImageMimes: input.referenceImageMimes,
+    referenceAudioPath: input.referenceAudioPath,
+    referenceAudioPaths: input.referenceAudioPaths,
+    referenceAudioUrl: input.referenceAudioUrl,
+    referenceAudioUrls: input.referenceAudioUrls,
+    referenceAudioBytes: input.referenceAudioBytes,
+    referenceAudioMimes: input.referenceAudioMimes,
+    generateAudio: input.generateAudio,
     imageRole: input.imageRole,
     thumb: input.thumb,
     videoUrl: null,
@@ -1491,6 +1636,8 @@ function inputFromTask(task) {
     imageUrl: publicMediaUrl(task.inputImageUrl) || null,
     lastFrameImageUrl: publicMediaUrl(task.lastFrameImageUrl) || null,
     referenceImageUrls: normalizeUrlList(task.referenceImageUrls || task.referenceImageUrl).map((url) => publicMediaUrl(url)),
+    referenceAudioUrls: normalizeUrlList(task.referenceAudioUrls || task.referenceAudioUrl).map((url) => publicMediaUrl(url)),
+    generateAudio: task.generateAudio !== false,
     resolution: task.resolution,
     aspect: task.aspect,
     duration: task.duration,
@@ -1723,7 +1870,7 @@ function mcpTools() {
     },
     {
       name: "create_video_task",
-      description: "Create a Studio/Seedance 2.0 Pro video task from text, actual first/last scene frames, or Ark reference image(s). Do not mix first/last-frame inputs with reference-media inputs in one task. Character sheets, info graphs, turnarounds, and reference boards must be passed as reference_image_url(s), never as image_url. For best shot control, use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame as image_url.",
+      description: "Create a Studio/Seedance 2.0 Pro video task from text, actual first/last scene frames, Ark reference image(s), or reference audio. Do not mix first/last-frame inputs with reference-image inputs in one task. Character sheets, info graphs, turnarounds, and reference boards must be passed as reference_image_url(s), never as image_url. For best shot control, use imagegen with thinking to make the real storyboard/scene frame first, then pass that scene frame as image_url.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1733,6 +1880,13 @@ function mcpTools() {
           image_role: { type: "string", enum: ["scene_first_frame", "character_reference"], description: "Role of image_url. Use scene_first_frame for an actual opening scene frame; use character_reference only when intentionally passing a character sheet/info graph as reference input." },
           reference_image_url: { type: "string", description: "Optional character reference image URL. Sent to Ark as an image_url content item with role=reference_image, not as the first frame. Do not combine with image_url/last_frame_image_url; use imagegen to bake the character into a scene frame when first-frame control is needed." },
           reference_image_urls: { type: "array", items: { type: "string" }, description: "Optional multiple character reference image URLs. Each is sent with role=reference_image. Do not combine with first/last frame images." },
+          audio_url: { type: "string", description: "Optional reference audio URL or audio data URL. Sent to Ark as an audio_url content item with role=reference_audio." },
+          audio_urls: { type: "array", items: { type: "string" }, description: "Optional multiple reference audio URLs. Alias for reference_audio_urls." },
+          reference_audio: { anyOf: [{ type: "string" }, { type: "array" }, { type: "object" }], description: "Optional reference audio URL, object with url/src/media_url, or array of those. Sent to Ark with role=reference_audio." },
+          reference_audio_url: { type: "string", description: "Optional reference audio URL or audio data URL. Alias for audio_url." },
+          reference_audio_urls: { type: "array", items: { type: "string" }, description: "Optional multiple reference audio URLs. Each is sent with role=reference_audio." },
+          generate_audio: { type: "boolean", default: true, description: "When true, request Ark/Seedance generated audio for the video." },
+          generateAudio: { type: "boolean", default: true, description: "Alias for generate_audio." },
           image_id: { type: "string", description: "Optional reference image id." },
           thumb: { type: "string", description: "Optional preview thumbnail URL. Do not pass the character reference image as the thumbnail." },
           resolution: { type: "string", enum: ["720p", "1080p", "2K"], default: "1080p" },
@@ -2308,6 +2462,7 @@ const server = createServer(async (req, res) => {
       data_dir: dataDir,
       max_json_body_bytes: maxJsonBodyBytes,
       max_image_bytes: maxImageBytes,
+      max_audio_bytes: maxAudioBytes,
       image_repo: {
         base_url: imageRepoBaseUrl,
         tag: imageRepoTag || null,
@@ -2318,6 +2473,7 @@ const server = createServer(async (req, res) => {
       input_images: [...tasks.values()].filter((task) => task.inputImagePath).length,
       last_frame_images: [...tasks.values()].filter((task) => task.lastFrameImagePath).length,
       reference_images: [...tasks.values()].reduce((total, task) => total + normalizeUrlList(task.referenceImagePaths || task.referenceImagePath).length, 0),
+      reference_audios: [...tasks.values()].reduce((total, task) => total + normalizeUrlList(task.referenceAudioPaths || task.referenceAudioPath).length, 0),
     });
     return;
   }

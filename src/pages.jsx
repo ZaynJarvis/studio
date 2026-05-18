@@ -52,6 +52,11 @@ function videoPatchFromTask(task, current = {}) {
       ? [task.character_reference_url]
       : current.characterReferenceUrls || [];
   const characterReferenceUrl = characterReferenceUrls[0] || current.characterReferenceUrl || null;
+  const referenceAudioUrls = Array.isArray(task.reference_audio_urls) && task.reference_audio_urls.length
+    ? task.reference_audio_urls
+    : task.reference_audio_url
+      ? [task.reference_audio_url]
+      : current.referenceAudioUrls || [];
 
   return {
     id: current.id || task.id,
@@ -70,6 +75,8 @@ function videoPatchFromTask(task, current = {}) {
     lastFrameUrl: task.last_frame_url || current.lastFrameUrl || null,
     characterReferenceUrl,
     characterReferenceUrls,
+    referenceAudioUrls,
+    generateAudio: task.generate_audio ?? current.generateAudio ?? true,
     duration: task.duration || current.duration || 5,
     resolution: task.resolution || current.resolution || "1080p",
     aspect: task.aspect || current.aspect || "16:9",
@@ -656,6 +663,8 @@ export function CreatePage() {
   const [image, setImage] = useState(templateFirstFrame);
   const [lastFrame, setLastFrame] = useState(templateLastFrame);
   const [referenceImages, setReferenceImages] = useState(templateReferenceImages);
+  const [referenceAudioText, setReferenceAudioText] = useState(() => (tmpl?.referenceAudioUrls || []).join("\n"));
+  const [generateAudio, setGenerateAudio] = useState(tmpl ? tmpl.generateAudio !== false : true);
   const [inputMode, setInputMode] = useState(() => tmpl?.mode === "i2v" ? "frames" : "references");
   const mode = inputMode === "frames" && image
     ? "i2v"
@@ -762,6 +771,9 @@ export function CreatePage() {
       const imageSrc = inputMode === "frames" ? image?.src : null;
       const lastFrameSrc = inputMode === "frames" ? lastFrame?.src : null;
       const referenceImageUrls = inputMode === "references" ? referenceImages.map((img) => img.src) : [];
+      const referenceAudioUrls = inputMode === "references"
+        ? referenceAudioText.split(/[\n,]+/).map((url) => url.trim()).filter(Boolean)
+        : [];
       const task = await fetchJson("/api/generate", {
         method: "POST",
         signal: controller.signal,
@@ -772,6 +784,8 @@ export function CreatePage() {
           image_role: imageSrc ? "scene_first_frame" : undefined,
           last_frame_image_url: lastFrameSrc,
           reference_image_urls: referenceImageUrls.length ? referenceImageUrls : undefined,
+          reference_audio_urls: referenceAudioUrls.length ? referenceAudioUrls : undefined,
+          generate_audio: generateAudio,
           image_id: inputMode === "frames" ? image?.id : undefined,
           model,
           resolution,
@@ -786,6 +800,8 @@ export function CreatePage() {
         referenceImageUrl: imageSrc || null,
         lastFrameUrl: lastFrameSrc || null,
         characterReferenceUrls: referenceImageUrls,
+        referenceAudioUrls,
+        generateAudio,
         imageId: inputMode === "frames" ? image?.id : undefined,
       }));
       navigate("/preview", { id: v.id });
@@ -940,6 +956,25 @@ export function CreatePage() {
                 <Icon name="refresh" size={14}/>
               </button>
             </div>
+          </ParamRow>
+
+          {inputMode === "references" && (
+            <ParamRow label="Reference audio">
+              <textarea
+                className="textarea"
+                value={referenceAudioText}
+                onChange={(e) => setReferenceAudioText(e.target.value)}
+                placeholder="https://..."
+                style={{ minHeight: 72 }}
+              />
+            </ParamRow>
+          )}
+
+          <ParamRow label="Generate audio">
+            <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "var(--fg-2)" }}>
+              <input type="checkbox" checked={generateAudio} onChange={(e) => setGenerateAudio(e.target.checked)} />
+              <span>Enabled</span>
+            </label>
           </ParamRow>
 
           <button className="btn btn-primary btn-lg" onClick={startGen} disabled={submitting} aria-busy={submitting} style={{ marginTop: 4 }}>

@@ -391,7 +391,6 @@ export function Nav({ route, navigate }) {
     { path: "/", icon: "home", label: "Home", kbd: "1" },
     { path: "/create", icon: "sparkle", label: "Create", kbd: "2" },
     { path: "/library", icon: "grid", label: "Library", kbd: "3" },
-    { path: "/zouk", icon: "message", label: "Zouk", kbd: "4" },
   ];
 
   return (
@@ -408,6 +407,7 @@ export function Nav({ route, navigate }) {
           </button>
         ))}
       </div>
+      <div id="zouk-studio-chat-slot" className="studio-chat-slot" />
     </nav>
   );
 }
@@ -814,7 +814,7 @@ export function CreatePage() {
   };
 
   return (
-    <div className="page-shell">
+    <div className="page-shell create-page">
       {node}
       <header className="create-header">
         <div>

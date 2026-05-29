@@ -40,6 +40,15 @@ const arkTitleModels = uniqueTitleModels([
   "doubao-seed-2-0-pro-260215",
   "doubao-seed-1-6-vision-250815",
 ]);
+const arkImageModel = process.env.ARK_IMAGE_MODEL || process.env.ARK_IMAGE_GEN_MODEL || "doubao-seedream-5-0-260128";
+const arkImageSize = process.env.ARK_IMAGE_SIZE || "1920x1920";
+const arkImageTimeoutMs = Number(process.env.ARK_IMAGE_TIMEOUT_MS || 120_000);
+const arkImagePromptModels = uniqueTitleModels([
+  process.env.ARK_IMAGE_PROMPT_MODEL,
+  process.env.ARK_VLM_TITLE_MODEL,
+  "doubao-seed-2-0-pro-260215",
+  "doubao-seed-1-6-vision-250815",
+]);
 const arkTitleTimeoutMs = Number(process.env.ARK_TITLE_TIMEOUT_MS || 20000);
 const arkTitleImageFetchTimeoutMs = Number(process.env.ARK_TITLE_IMAGE_FETCH_TIMEOUT_MS || 8000);
 const arkTitleMaxImageBytes = Number(process.env.ARK_TITLE_MAX_IMAGE_BYTES || 5 * 1024 * 1024);
@@ -927,6 +936,316 @@ function uploadedImagePayload(persisted, name) {
   };
 }
 
+function normalizeTextList(value) {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return values
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function normalizeImageSize(value) {
+  const raw = String(value || arkImageSize || "").trim().toLowerCase();
+  return /^\d{3,5}x\d{3,5}$/.test(raw) ? raw : "1920x1920";
+}
+
+function cleanModelText(value, max = 1600) {
+  return String(value || "")
+    .replace(/^```(?:\w+)?/i, "")
+    .replace(/```$/i, "")
+    .trim()
+    .slice(0, max);
+}
+
+function absoluteRequestUrl(value, baseUrl) {
+  const raw = String(value || "").trim();
+  if (!raw || raw.startsWith("data:") || /^https?:\/\//i.test(raw)) return raw;
+  if (!baseUrl) return raw;
+  try {
+    return new URL(raw, baseUrl).toString();
+  } catch {
+    return raw;
+  }
+}
+
+function characterZoneContext(input = {}, mediaBaseUrl = publicBaseUrl) {
+  const zone = input.zone && typeof input.zone === "object" ? input.zone : {};
+  const characterName = String(input.character_name || input.characterName || input.name || "Character").trim();
+  const characterCode = String(input.character_code || input.characterCode || input.code || "").trim();
+  const zoneId = String(input.zone_id || input.zoneId || zone.id || "zone").trim();
+  const zoneLabel = String(input.zone_label || input.zoneLabel || zone.label || zoneId).trim();
+  const zoneRole = String(input.zone_role || input.zoneRole || zone.role || "").trim();
+  const instruction = String(input.instruction || zone.instruction || zone.improvement || "").trim();
+  const crop = Array.isArray(input.crop) ? input.crop : Array.isArray(zone.crop) ? zone.crop : [];
+  const identityContract = normalizeTextList(input.identity_contract || input.identityContract);
+  const negativePrompt = String(input.negative_prompt || input.negativePrompt || "").trim();
+  const referenceUrls = normalizeUrlList([
+    input.source_image_url || input.sourceImageUrl,
+    input.reference_image_url || input.referenceImageUrl,
+    input.current_image_url || input.currentImageUrl,
+    ...(normalizeUrlList(input.reference_image_urls || input.referenceImageUrls)),
+  ]).map((url) => absoluteRequestUrl(url, mediaBaseUrl));
+
+  if (!instruction) {
+    throw httpError(400, "instruction_required", "A zone improvement instruction is required.");
+  }
+
+  return {
+    characterName,
+    characterCode,
+    zoneId,
+    zoneLabel,
+    zoneRole,
+    instruction,
+    crop,
+    aspect: String(input.aspect || zone.aspect || "1:1").trim(),
+    identityContract,
+    negativePrompt,
+    referenceUrls,
+    size: normalizeImageSize(input.size || input.output_size || input.outputSize),
+    seed: clampInt(input.seed, -1, 4_294_967_295, Math.floor(Math.random() * 99_999)),
+  };
+}
+
+function buildCharacterZonePrompt(context, referencePrompt = "") {
+  const contract = context.identityContract.length
+    ? context.identityContract.join(" ")
+    : "Preserve the exact same character identity, proportions, material texture, lighting, and expression from the source reference.";
+  const cropText = context.crop.length ? `Crop coordinates from the source sheet: [${context.crop.join(", ")}].` : "";
+
+  return [
+    "Generate exactly one photorealistic Studio character identity-dossier image.",
+    `Character: ${context.characterName}${context.characterCode ? ` (${context.characterCode})` : ""}.`,
+    `Zone: ${context.zoneId} / ${context.zoneLabel}.`,
+    context.zoneRole ? `Zone role: ${context.zoneRole}.` : "",
+    `Requested improvement: ${context.instruction}`,
+    referencePrompt ? `Reference-derived visual brief: ${referencePrompt}` : "",
+    `Identity lock: ${contract}`,
+    cropText,
+    `Output composition: a clean single-zone image, ${context.aspect} aspect intent, plain soft gray studio background, no contact-sheet grid, no labels, no captions, no UI, no watermark.`,
+    context.negativePrompt ? `Negative prompt: ${context.negativePrompt}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+async function buildReferenceAwarePrompt(context, signal = undefined) {
+  const urls = context.referenceUrls.slice(0, 3);
+  if (!arkImagePromptModels.length || !urls.length) return "";
+
+  const images = [];
+  for (const url of urls) {
+    const image = await titleImageDataUrl(url, signal);
+    if (image) images.push(image);
+  }
+  if (!images.length) return "";
+
+  const promptText = [
+    "You are writing a reference-aware prompt for an image generation model.",
+    "Use the attached character/reference images to describe the visible identity cues that must be preserved.",
+    "Return one compact English prompt paragraph only. No markdown, no bullets, no preface.",
+    `Target zone: ${context.zoneId} / ${context.zoneLabel}.`,
+    context.zoneRole ? `Zone role: ${context.zoneRole}.` : "",
+    `Requested change: ${context.instruction}`,
+    context.identityContract.length ? `Identity rules: ${context.identityContract.join(" ")}` : "",
+    context.negativePrompt ? `Avoid: ${context.negativePrompt}` : "",
+  ].filter(Boolean).join("\n");
+
+  for (const model of arkImagePromptModels) {
+    try {
+      const chatContent = [{ type: "text", text: promptText }];
+      for (const image of images) {
+        chatContent.push({ type: "image_url", image_url: { url: image } });
+      }
+      const chatRaw = await arkFetch("/chat/completions", {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: chatContent }],
+          max_tokens: 420,
+          temperature: 0.2,
+        }),
+      });
+      const chatText = cleanModelText(extractResponseText(chatRaw));
+      if (chatText) return chatText;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      console.warn(`character reference chat prompt failed with ${model}`, publicError(error));
+    }
+
+    try {
+      const responseContent = [{ type: "input_text", text: promptText }];
+      for (const image of images) {
+        responseContent.push({ type: "input_image", image_url: image });
+      }
+      const raw = await arkFetch("/responses", {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          model,
+          input: [{ role: "user", content: responseContent }],
+          max_output_tokens: 420,
+          temperature: 0.2,
+        }),
+      });
+      const text = cleanModelText(extractResponseText(raw));
+      if (text) return text;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      console.warn(`character reference responses prompt failed with ${model}`, publicError(error));
+    }
+  }
+
+  return "";
+}
+
+function extractGeneratedImage(raw = {}) {
+  const items = [
+    ...(Array.isArray(raw.data) ? raw.data : []),
+    ...(Array.isArray(raw.images) ? raw.images : []),
+    raw.image,
+    raw.result,
+  ].filter(Boolean);
+
+  for (const item of items) {
+    if (typeof item === "string") {
+      if (item.startsWith("data:")) return { dataUrl: item };
+      if (/^https?:\/\//i.test(item)) return { url: item };
+    }
+    const url = item?.url || item?.image_url || item?.imageUrl || item?.output_url || item?.outputUrl;
+    if (typeof url === "string" && url) return { url };
+    const b64 = item?.b64_json || item?.b64Json || item?.base64 || item?.image_base64 || item?.imageBase64;
+    if (typeof b64 === "string" && b64) {
+      const mime = item?.mime || item?.content_type || item?.contentType || "image/jpeg";
+      return { dataUrl: `data:${mime};base64,${b64.replace(/^data:[^,]+,/, "")}` };
+    }
+  }
+
+  const url = raw.url || raw.image_url || raw.imageUrl || raw.output_url || raw.outputUrl || normalizeUrlList(raw.output_urls || raw.outputUrls)[0];
+  if (typeof url === "string" && url) return { url };
+
+  throw httpError(502, "image_generation_empty", "Ark image generation returned no image.");
+}
+
+async function imageUrlToDataUrl(imageUrl, label = "Image", signal = undefined) {
+  const raw = String(imageUrl || "").trim();
+  if (!raw) return null;
+  if (raw.startsWith("data:")) return raw;
+  if (!/^https?:\/\//i.test(raw)) return null;
+
+  const response = await fetch(raw, { signal });
+  if (!response.ok) {
+    throw httpError(response.status || 502, "generated_image_fetch_failed", `Could not fetch ${label.toLowerCase()} for storage.`);
+  }
+
+  const contentType = String(response.headers.get("content-type") || mimeFromImageUrl(raw)).split(";")[0].trim() || "image/jpeg";
+  if (!contentType.startsWith("image/")) {
+    throw httpError(502, "generated_image_not_image", `${label} response was not an image.`);
+  }
+
+  const length = Number(response.headers.get("content-length") || 0);
+  if (length > maxImageBytes) {
+    throw httpError(413, "generated_image_too_large", `${label} is larger than MAX_IMAGE_BYTES.`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length) {
+    throw httpError(502, "generated_image_empty", `${label} response was empty.`);
+  }
+  if (buffer.length > maxImageBytes) {
+    throw httpError(413, "generated_image_too_large", `${label} is larger than MAX_IMAGE_BYTES.`);
+  }
+
+  return `data:${contentType};base64,${buffer.toString("base64")}`;
+}
+
+async function generateCharacterZoneImage(rawInput, mediaBaseUrl = publicBaseUrl) {
+  const context = characterZoneContext(rawInput, mediaBaseUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), arkImageTimeoutMs);
+  timeout.unref?.();
+
+  try {
+    const referencePrompt = await buildReferenceAwarePrompt(context, controller.signal);
+    const prompt = buildCharacterZonePrompt(context, referencePrompt);
+    const requestBody = {
+      model: arkImageModel,
+      prompt,
+      size: context.size,
+      n: 1,
+      response_format: "url",
+    };
+    if (context.seed >= 0) requestBody.seed = context.seed;
+
+    const raw = await arkFetch("/images/generations", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify(requestBody),
+    });
+    const generated = extractGeneratedImage(raw);
+    let dataUrl = generated.dataUrl || null;
+    const name = cleanImageUploadName(
+      `${context.characterName || "character"}-${context.zoneId}-${Date.now()}.jpg`,
+      ".jpg"
+    );
+
+    let persisted = null;
+    let persistError = null;
+    if (!dataUrl && imageRepoUploadKey) {
+      try {
+        dataUrl = await imageUrlToDataUrl(generated.url, "Generated image", controller.signal);
+      } catch (error) {
+        persistError = publicError(error);
+        console.warn("character generated image fetch failed", persistError);
+      }
+    }
+    if (dataUrl && imageRepoUploadKey) {
+      try {
+        persisted = await uploadImageToRepo(dataUrl, name, "Generated character zone");
+      } catch (error) {
+        persistError = publicError(error);
+        console.warn("character image cloud persistence failed", persistError);
+      }
+    }
+
+    const fallbackImage = {
+      id: `i_${randomUUID()}`,
+      name,
+      src: persisted?.url || generated.url || dataUrl,
+      url: persisted?.url || generated.url || dataUrl,
+      media_path: persisted?.mediaPath || generated.url || null,
+      path: persisted?.path || null,
+      key: persisted?.key || null,
+      tag: persisted?.tag || imageRepoTag || null,
+      provider: persisted ? "cloud" : "ark",
+      bytes: persisted?.bytes || null,
+      mime: persisted?.mime || null,
+      media_type: "image",
+      cloud: Boolean(persisted),
+      temporary: !persisted,
+    };
+
+    return {
+      ok: true,
+      zone_id: context.zoneId,
+      model: arkImageModel,
+      size: context.size,
+      seed: context.seed,
+      prompt,
+      reference_prompt: referencePrompt,
+      persisted: Boolean(persisted),
+      temporary: !persisted,
+      persist_error: persistError,
+      image: persisted ? uploadedImagePayload(persisted, name) : fallbackImage,
+    };
+  } catch (error) {
+    if (controller.signal.aborted && !error.status) {
+      throw httpError(504, "image_generation_timeout", "Character image generation timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function imageTimestamp(value) {
   const ts = Date.parse(value || "");
   return Number.isFinite(ts) ? ts : Date.now();
@@ -1595,6 +1914,11 @@ async function handleUploadImage(req, res) {
   sendJson(res, 201, { image: uploadedImagePayload(persisted, input.name || input.filename) });
 }
 
+async function handleCharacterZoneImage(req, res) {
+  const payload = await generateCharacterZoneImage(await readJson(req), publicBaseUrl || requestPublicBaseUrl(req));
+  sendJson(res, 201, payload);
+}
+
 async function handleListImages(req, res, url) {
   const limit = clampInt(url.searchParams.get("limit"), 1, 100, 100);
   const cursor = url.searchParams.get("cursor") || "";
@@ -2156,6 +2480,11 @@ async function routeApi(req, res, url) {
 
     if (url.pathname === "/api/generate" && req.method === "POST") {
       await handleGenerate(req, res);
+      return true;
+    }
+
+    if (url.pathname === "/api/character-design/zone" && req.method === "POST") {
+      await handleCharacterZoneImage(req, res);
       return true;
     }
 

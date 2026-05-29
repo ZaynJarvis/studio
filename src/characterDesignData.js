@@ -1,6 +1,9 @@
 const assets = {
-  source: new URL("../design/character-identity-prototype/character/assets/reference-dog/source.jpg", import.meta.url).href,
+  source: new URL("../design/character-identity-prototype/character/assets/duoduo/source.jpg", import.meta.url).href,
   sourceCard: new URL("../design/character-identity-prototype/character/assets/duoduo/card.jpg", import.meta.url).href,
+  sourceFullFront: new URL("../design/character-identity-prototype/character/assets/duoduo/full_front.jpg", import.meta.url).href,
+  sourceHalfBody: new URL("../design/character-identity-prototype/character/assets/duoduo/half_body.jpg", import.meta.url).href,
+  sourceFaceFront: new URL("../design/character-identity-prototype/character/assets/duoduo/face_front.jpg", import.meta.url).href,
   generatedSheet: new URL("../design/character-identity-prototype/character/assets/generated/duoduo-sheet/sheet-02.png", import.meta.url).href,
   fullFront: new URL("../design/character-identity-prototype/character/assets/generated/duoduo-zones/full_front.png", import.meta.url).href,
   fullSide: new URL("../design/character-identity-prototype/character/assets/generated/duoduo-zones/full_side.png", import.meta.url).href,
@@ -22,7 +25,9 @@ export const CHARACTER_ZONE_DEFS = [
     role: "front standing body view",
     crop: [5, 5, 378, 405],
     aspect: "3 / 4",
-    image: assets.fullFront,
+    image: assets.sourceFullFront,
+    sheetImage: assets.fullFront,
+    referenceImage: assets.sourceFullFront,
     improvement: "Improve the front standing body view while preserving the same tiny white toy-breed dog, compact body, short legs, round puffy face, dark eyes, cream-white coat, and calm posture.",
   },
   {
@@ -33,6 +38,8 @@ export const CHARACTER_ZONE_DEFS = [
     crop: [385, 5, 785, 405],
     aspect: "3 / 4",
     image: assets.fullSide,
+    sheetImage: assets.fullSide,
+    referenceImage: assets.sourceCard,
     improvement: "Improve the side profile so it reads as the same dog from the front view: tiny body, short legs, fluffy cream-white coat, soft ears, and no breed drift.",
   },
   {
@@ -43,6 +50,8 @@ export const CHARACTER_ZONE_DEFS = [
     crop: [793, 5, 1102, 405],
     aspect: "3 / 4",
     image: assets.fullBack,
+    sheetImage: assets.fullBack,
+    referenceImage: assets.sourceCard,
     improvement: "Improve the back view anatomy and coat continuity without changing scale, breed, background, or the identity cues visible in the other body views.",
   },
   {
@@ -52,7 +61,9 @@ export const CHARACTER_ZONE_DEFS = [
     role: "front three-quarter half-body portrait",
     crop: [1110, 5, 1531, 405],
     aspect: "3 / 4",
-    image: assets.halfBody,
+    image: assets.sourceHalfBody,
+    sheetImage: assets.halfBody,
+    referenceImage: assets.sourceHalfBody,
     improvement: "Improve the half-body portrait for face readability and body consistency while keeping the same calm tiny white dog and studio lighting.",
   },
   {
@@ -62,7 +73,9 @@ export const CHARACTER_ZONE_DEFS = [
     role: "front face close-up",
     crop: [5, 412, 531, 758],
     aspect: "1 / 1",
-    image: assets.faceFront,
+    image: assets.sourceFaceFront,
+    sheetImage: assets.faceFront,
+    referenceImage: assets.sourceFaceFront,
     improvement: "Improve the front face close-up. Lock the round puffy baby face, oversized glossy dark eyes set close together, small black button nose, compact muzzle, and cream-white wispy coat.",
   },
   {
@@ -73,6 +86,8 @@ export const CHARACTER_ZONE_DEFS = [
     crop: [538, 412, 1014, 758],
     aspect: "1 / 1",
     image: assets.faceLeft,
+    sheetImage: assets.faceLeft,
+    referenceImage: assets.sourceFaceFront,
     improvement: "Improve the left face profile while matching the front face identity: short compact muzzle, soft floppy ears, dark round eye, and no poodle-like snout drift.",
   },
   {
@@ -83,6 +98,8 @@ export const CHARACTER_ZONE_DEFS = [
     crop: [1021, 412, 1531, 758],
     aspect: "1 / 1",
     image: assets.faceRight,
+    sheetImage: assets.faceRight,
+    referenceImage: assets.sourceFaceFront,
     improvement: "Improve the right face profile while matching the front and left face zones. Preserve muzzle length, puffy head shape, ear softness, and coat texture.",
   },
   {
@@ -93,6 +110,8 @@ export const CHARACTER_ZONE_DEFS = [
     crop: [5, 765, 531, 1018],
     aspect: "1 / 1",
     image: assets.outfit,
+    sheetImage: assets.outfit,
+    referenceImage: assets.sourceFaceFront,
     improvement: "Improve the coat texture detail only. Keep it cream-white, fluffy, slightly wispy, natural, and consistent with the same dog instead of a perfect show-groomed coat.",
   },
   {
@@ -103,6 +122,8 @@ export const CHARACTER_ZONE_DEFS = [
     crop: [538, 765, 1014, 1018],
     aspect: "1 / 1",
     image: assets.shoes,
+    sheetImage: assets.shoes,
+    referenceImage: assets.sourceFullFront,
     improvement: "Improve the paws detail only. Repair anatomy, paw count, fur shape, and scale while preserving the same tiny toy-breed dog.",
   },
   {
@@ -113,6 +134,8 @@ export const CHARACTER_ZONE_DEFS = [
     crop: [1021, 765, 1531, 1018],
     aspect: "1 / 1",
     image: assets.bag,
+    sheetImage: assets.bag,
+    referenceImage: assets.sourceCard,
     improvement: "Improve the blue plush toy prop detail while keeping it separate from the dog identity zones and avoiding text, logos, or watermark-like marks.",
   },
 ];

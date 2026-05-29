@@ -152,6 +152,7 @@ function imageFromUploadResponse(data, fallback = {}) {
     throw new Error("Image upload did not return a URL.");
   }
 
+  const provider = image.provider || fallback.provider || "cloud";
   return {
     id: image.id || fallback.id,
     name: image.name || fallback.name || "upload.png",
@@ -161,12 +162,13 @@ function imageFromUploadResponse(data, fallback = {}) {
     path: image.path || fallback.path,
     key: image.key || fallback.key || null,
     tag: image.tag || fallback.tag || null,
-    provider: image.provider || fallback.provider || "cloud",
+    provider,
     bytes: image.bytes || fallback.bytes,
     mime: image.mime || fallback.mime,
     mediaType: image.mediaType || image.media_type || fallback.mediaType || "image",
     addedAt: image.added_at || fallback.addedAt || Date.now(),
-    cloud: true,
+    cloud: image.cloud ?? fallback.cloud ?? (provider === "cloud" || Boolean(image.key)),
+    temporary: image.temporary ?? fallback.temporary ?? false,
   };
 }
 
@@ -490,6 +492,9 @@ function mergeCharacterZones(saved = {}) {
       note: override.note || "Prototype crop",
       botRequestedAt: override.botRequestedAt || null,
       lastBotPrompt: override.lastBotPrompt || "",
+      model: override.model || "",
+      generatedPrompt: override.generatedPrompt || "",
+      temporary: Boolean(override.temporary),
     };
   });
 }
@@ -550,8 +555,10 @@ export function CharacterDesignPage() {
   const activeZone = zones.find((zone) => zone.id === selectedZoneId) || zones[0];
   const [zoneDrafts, setZoneDrafts] = useState({});
   const [replacingZone, setReplacingZone] = useState("");
+  const [generatingZone, setGeneratingZone] = useState("");
   const activeInstruction = zoneDrafts[activeZone.id] ?? activeZone.improvement;
   const updatedZones = zones.filter((zone) => zone.updatedAt).length;
+  const activeGenerating = generatingZone === activeZone.id;
 
   useEffect(() => {
     if (!activeZone?.id || saved.activeZoneId === activeZone.id) return;
@@ -596,6 +603,70 @@ export function CharacterDesignPage() {
       show(error.message || "Zone upload failed");
     } finally {
       setReplacingZone("");
+    }
+  };
+
+  const improveZoneWithModel = async () => {
+    if (!activeZone || generatingZone) return;
+    setGeneratingZone(activeZone.id);
+    try {
+      const data = await fetchJson("/api/character-design/zone", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          character_id: CHARACTER_DESIGN.id,
+          character_name: CHARACTER_DESIGN.name,
+          character_code: CHARACTER_DESIGN.code,
+          zone: {
+            id: activeZone.id,
+            label: activeZone.label,
+            role: activeZone.role,
+            crop: activeZone.crop,
+            aspect: activeZone.aspect,
+          },
+          instruction: activeInstruction,
+          identity_contract: CHARACTER_DESIGN.identityContract,
+          negative_prompt: CHARACTER_DESIGN.negativePrompt,
+          source_image_url: CHARACTER_DESIGN.sourceCard,
+          reference_image_url: activeZone.referenceImage || CHARACTER_DESIGN.sourceCard,
+          current_image_url: activeZone.currentImage,
+          size: "1920x1920",
+        }),
+      });
+      const remote = imageFromUploadResponse(data, {
+        name: `${CHARACTER_DESIGN.shortName} ${activeZone.label}`,
+        provider: data.persisted ? "cloud" : "ark",
+        tag: "studio",
+      });
+      const item = addImage({
+        ...remote,
+        name: `${CHARACTER_DESIGN.shortName} ${activeZone.label}`,
+        provider: remote.provider || (data.persisted ? "cloud" : "ark"),
+        tag: remote.tag || "studio",
+      });
+      updateCharacterDesign(CHARACTER_DESIGN.id, (current) => ({
+        activeZoneId: activeZone.id,
+        zones: {
+          ...(current.zones || {}),
+          [activeZone.id]: {
+            url: item.src,
+            name: item.name,
+            imageId: item.id,
+            updatedAt: Date.now(),
+            note: data.persisted ? "Model improvement" : "Model improvement (temporary URL)",
+            lastBotPrompt: activeInstruction,
+            model: data.model || "ark-image",
+            generatedPrompt: data.prompt || "",
+            referencePrompt: data.reference_prompt || "",
+            temporary: Boolean(data.temporary),
+          },
+        },
+      }));
+      show(data.persisted ? `${activeZone.label} improved by model` : `${activeZone.label} generated; Cloud key missing`);
+    } catch (error) {
+      show(error.message || "Model image update failed");
+    } finally {
+      setGeneratingZone("");
     }
   };
 
@@ -740,7 +811,7 @@ export function CharacterDesignPage() {
           </div>
 
           <div>
-            <label className="label">Codex request</label>
+            <label className="label">Zone improvement request</label>
             <textarea
               className="textarea character-bot-textarea"
               value={activeInstruction}
@@ -748,8 +819,14 @@ export function CharacterDesignPage() {
             />
           </div>
 
+          <div className="character-model-actions">
+            <button className="btn btn-primary" onClick={improveZoneWithModel} disabled={Boolean(generatingZone || replacingZone)}>
+              {activeGenerating ? <span className="spinner" /> : <Icon name="sparkle" size={14} />} Improve image
+            </button>
+          </div>
+
           <div className="character-bot-actions">
-            <button className="btn btn-primary" onClick={askBot}>
+            <button className="btn" onClick={askBot} disabled={Boolean(generatingZone)}>
               <Icon name="message" size={14} /> Ask bot
             </button>
             <button className="btn" onClick={copyPrompt}>
@@ -781,6 +858,13 @@ export function CharacterDesignPage() {
             <div className="character-bot-status">
               <span>bot</span>
               <strong>{relTime(activeZone.botRequestedAt)}</strong>
+            </div>
+          )}
+
+          {activeZone.model && (
+            <div className="character-bot-status">
+              <span>model</span>
+              <strong>{activeZone.temporary ? `${activeZone.model} · temporary` : activeZone.model}</strong>
             </div>
           )}
         </aside>

@@ -415,7 +415,7 @@ a{color:inherit;text-decoration:none}
 .character-zone-board{min-width:0}
 .character-zone-toolbar .display{font-size:28px!important}
 .character-zone-grid{
-  display:grid;grid-template-columns:repeat(5,minmax(0,1fr));
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));
   gap:12px;align-items:start;
 }
 .character-zone-card{
@@ -431,8 +431,8 @@ a{color:inherit;text-decoration:none}
 }
 .character-zone-img img{width:100%;height:100%;object-fit:cover;display:block}
 .character-zone-meta{
-  display:flex;align-items:flex-start;justify-content:space-between;gap:8px;
-  min-height:68px;padding:10px;
+  display:grid;grid-template-columns:minmax(0,1fr);gap:6px;
+  min-height:72px;padding:10px;
 }
 .character-zone-meta div{min-width:0}
 .character-zone-meta span,.character-zone-meta em{
@@ -441,9 +441,9 @@ a{color:inherit;text-decoration:none}
 }
 .character-zone-meta strong{
   display:block;margin-top:4px;font-size:13px;font-weight:600;color:var(--fg);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  line-height:1.2;overflow:hidden;text-overflow:ellipsis;
 }
-.character-zone-meta em{color:var(--accent);white-space:nowrap}
+.character-zone-meta em{color:var(--accent);white-space:nowrap;justify-self:start}
 .character-bot-preview{
   overflow:hidden;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg-3);aspect-ratio:1;
 }
@@ -464,7 +464,8 @@ a{color:inherit;text-decoration:none}
   min-width:0;font-family:var(--font-mono);font-size:11px;color:var(--fg-2);font-weight:400;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
-.character-bot-textarea{min-height:150px;font-size:13px}
+.character-bot-textarea{min-height:120px;font-size:13px}
+.character-model-actions{display:grid;grid-template-columns:1fr;gap:8px}
 .character-bot-actions,.character-zone-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .character-bot-panel .drop{min-height:142px;padding:20px}
 .character-bot-panel .drop .drop-icon{width:28px;height:28px}

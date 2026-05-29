@@ -6,11 +6,13 @@ const DEFAULT_STATE = {
   apiKey: "",
   videos: [],
   images: [],
+  characterDesigns: {},
 };
 
 function sanitizeState(state) {
   const videos = Array.isArray(state?.videos) ? state.videos : [];
   const images = Array.isArray(state?.images) ? state.images : [];
+  const characterDesigns = state?.characterDesigns && typeof state.characterDesigns === "object" ? state.characterDesigns : {};
 
   return {
     ...DEFAULT_STATE,
@@ -19,6 +21,7 @@ function sanitizeState(state) {
       .filter((v) => !String(v?.id || "").startsWith("v_seed_"))
       .map((v) => ({ ...v, model: "seedance-pro" })),
     images: images.filter((img) => !String(img?.id || "").startsWith("i_seed_")),
+    characterDesigns,
   };
 }
 
@@ -99,6 +102,20 @@ export function StoreProvider({ children }) {
       ...s,
       images: s.images.map((img) => (img.id === id ? { ...img, ...patch } : img)),
     }));
+  }, []);
+
+  const updateCharacterDesign = useCallback((id, updater) => {
+    setState((s) => {
+      const current = s.characterDesigns?.[id] || {};
+      const patch = typeof updater === "function" ? updater(current) : updater;
+      return {
+        ...s,
+        characterDesigns: {
+          ...(s.characterDesigns || {}),
+          [id]: { ...current, ...(patch || {}) },
+        },
+      };
+    });
   }, []);
 
   const mergeImages = useCallback((images) => {
@@ -194,8 +211,8 @@ export function StoreProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ state, setApiKey, addImage, removeImage, updateImage, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo }),
-    [state, setApiKey, addImage, removeImage, updateImage, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo]
+    () => ({ state, setApiKey, addImage, removeImage, updateImage, updateCharacterDesign, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo }),
+    [state, setApiKey, addImage, removeImage, updateImage, updateCharacterDesign, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo]
   );
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;

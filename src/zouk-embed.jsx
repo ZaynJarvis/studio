@@ -319,6 +319,7 @@ export function ZoukStudioChat({ route }) {
   const scrollRef = useRef(null);
   const textareaRef = useRef(null);
   const wsRef = useRef(null);
+  const pendingAutoSendRef = useRef(null);
   const target = `#${CONFIG.channel}`;
   const referencedText = compactText(selectedText);
   const includeContextUrl = Boolean(sourceUrl && (sourceUrl !== lastContextUrl || referencedText));
@@ -474,11 +475,11 @@ export function ZoukStudioChat({ route }) {
     return () => window.clearTimeout(timer);
   }, [route?.path]);
 
-  const sendMessage = useCallback(async () => {
-    const trimmed = composer.trim();
+  const sendComposedMessage = useCallback(async (rawMessage, context = {}) => {
+    const trimmed = String(rawMessage || '').trim();
     if (!trimmed || !token || status === 'sending') return;
-    const nextSourceUrl = rememberSource();
-    const nextReferencedText = compactText(selectedText);
+    const nextSourceUrl = context.sourceUrl || rememberSource();
+    const nextReferencedText = compactText(context.referencedText ?? selectedText);
     const nextIncludeUrl = Boolean(nextSourceUrl && (nextSourceUrl !== lastContextUrl || nextReferencedText));
     const content = messageWithInjectedContext(
       trimmed,
@@ -505,7 +506,45 @@ export function ZoukStudioChat({ route }) {
       setStatus('error');
       setError(err instanceof Error ? err.message : 'Send failed');
     }
-  }, [authHeaders, composer, lastContextUrl, rememberSource, selectedText, status, target, token]);
+  }, [authHeaders, lastContextUrl, rememberSource, selectedText, status, target, token]);
+
+  useEffect(() => {
+    const onCompose = (event) => {
+      const detail = event?.detail || {};
+      const message = String(detail.message || '').trim();
+      if (!message) return;
+      const nextSourceUrl = detail.sourceUrl || currentSourceUrl();
+      const nextReferencedText = compactText(detail.referencedText || '');
+
+      setSourceUrl(nextSourceUrl);
+      setSelectedText(nextReferencedText);
+      setComposer(message);
+      setOpen(true);
+      if (detail.autoSend) {
+        pendingAutoSendRef.current = {
+          message,
+          sourceUrl: nextSourceUrl,
+          referencedText: nextReferencedText,
+        };
+      } else {
+        pendingAutoSendRef.current = null;
+      }
+      window.setTimeout(() => textareaRef.current?.focus(), 80);
+    };
+    window.addEventListener('studio:zouk-compose', onCompose);
+    return () => window.removeEventListener('studio:zouk-compose', onCompose);
+  }, []);
+
+  useEffect(() => {
+    const pending = pendingAutoSendRef.current;
+    if (!open || !token || status === 'connecting' || status === 'sending' || !pending) return;
+    pendingAutoSendRef.current = null;
+    sendComposedMessage(pending.message, pending);
+  }, [open, sendComposedMessage, status, token]);
+
+  const sendMessage = useCallback(async () => {
+    await sendComposedMessage(composer);
+  }, [composer, sendComposedMessage]);
 
   const onSubmit = (event) => {
     event.preventDefault();

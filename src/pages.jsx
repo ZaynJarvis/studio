@@ -3,6 +3,7 @@ import { Icon, DropZone, VideoPlayer, GenerationProgress, useToast } from './com
 import { useStore, useHashRoute, relTime, fmtDate } from './store';
 import { authHeader, clearToken, getToken } from './auth';
 import { prepareUploadImage } from './imageUpload';
+import { CHARACTER_DESIGN } from './characterDesignData';
 
 const HOST_PARAMS = {
   resolutions: ["720p", "1080p"],
@@ -435,6 +436,7 @@ export function Nav({ route, navigate }) {
     { path: "/", icon: "home", label: "Home", kbd: "1" },
     { path: "/create", icon: "sparkle", label: "Create", kbd: "2" },
     { path: "/library", icon: "grid", label: "Library", kbd: "3" },
+    { path: "/design", icon: "message", label: "Design", kbd: "4" },
   ];
 
   return (
@@ -464,6 +466,325 @@ function SectionHeader({ title, sub, count }) {
         {count != null && <span className="mono muted-2" style={{ fontSize: 11, letterSpacing: ".14em" }}>{String(count).padStart(2,"0")}</span>}
       </div>
       {sub && <span className="mono muted-2" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase" }}>{sub}</span>}
+    </div>
+  );
+}
+
+function characterDesignDeepLink(zoneId) {
+  if (typeof window === "undefined") return "";
+  const url = new URL(window.location.href);
+  url.hash = `/design?zone=${encodeURIComponent(zoneId)}`;
+  return url.toString();
+}
+
+function mergeCharacterZones(saved = {}) {
+  const savedZones = saved.zones || {};
+  return CHARACTER_DESIGN.zones.map((zone) => {
+    const override = savedZones[zone.id] || {};
+    return {
+      ...zone,
+      currentImage: override.url || zone.image,
+      currentName: override.name || `${CHARACTER_DESIGN.shortName} ${zone.label}`,
+      imageId: override.imageId || null,
+      updatedAt: override.updatedAt || null,
+      note: override.note || "Prototype crop",
+      botRequestedAt: override.botRequestedAt || null,
+      lastBotPrompt: override.lastBotPrompt || "",
+    };
+  });
+}
+
+function buildZoneContext(zone, instruction) {
+  return [
+    `Character: ${CHARACTER_DESIGN.name} (${CHARACTER_DESIGN.code})`,
+    `Zone: ${zone.id} / ${zone.label}`,
+    `Role: ${zone.role}`,
+    `Current image: ${zone.currentImage}`,
+    `Crop box: [${zone.crop.join(", ")}] on the 1531x1018 generated sheet`,
+    `Requested improvement: ${instruction}`,
+    `Identity contract: ${CHARACTER_DESIGN.identityContract.join(" ")}`,
+    `Negative prompt: ${CHARACTER_DESIGN.negativePrompt}`,
+  ].join("\n");
+}
+
+function buildZoneBotMessage(zone, instruction) {
+  return [
+    "@stark please improve this Studio character-design zone only.",
+    "",
+    `Character: ${CHARACTER_DESIGN.name} (${CHARACTER_DESIGN.code})`,
+    `Zone: ${zone.id} / ${zone.label}`,
+    `Role: ${zone.role}`,
+    `Current image URL: ${zone.currentImage}`,
+    `Crop box: [${zone.crop.join(", ")}] in the 1531x1018 sheet coordinate system`,
+    "",
+    "Change request:",
+    instruction,
+    "",
+    "Keep the other zones unchanged. Preserve the same dog identity across the dossier. If you generate or edit an image, replace only this zone image in Studio and report the new image URL/path.",
+    "",
+    `Identity contract: ${CHARACTER_DESIGN.identityContract.join(" ")}`,
+    `Negative prompt: ${CHARACTER_DESIGN.negativePrompt}`,
+  ].join("\n");
+}
+
+function CharacterSpecRows({ rows }) {
+  return (
+    <div className="character-spec-rows">
+      {rows.map(([label, value]) => (
+        <div key={label}>
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function CharacterDesignPage() {
+  const { state, addImage, updateCharacterDesign } = useStore();
+  const { query, navigate } = useHashRoute();
+  const { show, node } = useToast();
+  const saved = useMemo(() => state.characterDesigns?.[CHARACTER_DESIGN.id] || {}, [state.characterDesigns]);
+  const zones = useMemo(() => mergeCharacterZones(saved), [saved]);
+  const selectedZoneId = query.zone || saved.activeZoneId || zones[0]?.id;
+  const activeZone = zones.find((zone) => zone.id === selectedZoneId) || zones[0];
+  const [zoneDrafts, setZoneDrafts] = useState({});
+  const [replacingZone, setReplacingZone] = useState("");
+  const activeInstruction = zoneDrafts[activeZone.id] ?? activeZone.improvement;
+  const updatedZones = zones.filter((zone) => zone.updatedAt).length;
+
+  useEffect(() => {
+    if (!activeZone?.id || saved.activeZoneId === activeZone.id) return;
+    updateCharacterDesign(CHARACTER_DESIGN.id, { activeZoneId: activeZone.id });
+  }, [activeZone?.id, saved.activeZoneId, updateCharacterDesign]);
+
+  const selectZone = (zoneId) => {
+    updateCharacterDesign(CHARACTER_DESIGN.id, { activeZoneId: zoneId });
+    navigate("/design", { zone: zoneId });
+  };
+
+  const replaceZoneImage = async (img) => {
+    if (!activeZone || replacingZone) return;
+    setReplacingZone(activeZone.id);
+    try {
+      const remote = await uploadImageAsset({
+        ...img,
+        name: `${CHARACTER_DESIGN.shortName}-${activeZone.id}-${img.name || "zone.png"}`,
+      });
+      const item = addImage({
+        ...remote,
+        name: `${CHARACTER_DESIGN.shortName} ${activeZone.label}`,
+        provider: remote.provider || "cloud",
+        tag: remote.tag || "studio",
+      });
+      updateCharacterDesign(CHARACTER_DESIGN.id, (current) => ({
+        activeZoneId: activeZone.id,
+        zones: {
+          ...(current.zones || {}),
+          [activeZone.id]: {
+            url: item.src,
+            name: item.name,
+            imageId: item.id,
+            updatedAt: Date.now(),
+            note: "Uploaded improvement",
+            lastBotPrompt: activeInstruction,
+          },
+        },
+      }));
+      show(`${activeZone.label} updated`);
+    } catch (error) {
+      show(error.message || "Zone upload failed");
+    } finally {
+      setReplacingZone("");
+    }
+  };
+
+  const resetActiveZone = () => {
+    updateCharacterDesign(CHARACTER_DESIGN.id, (current) => {
+      const nextZones = { ...(current.zones || {}) };
+      delete nextZones[activeZone.id];
+      return { activeZoneId: activeZone.id, zones: nextZones };
+    });
+    show(`${activeZone.label} reset`);
+  };
+
+  const addZoneToLibrary = () => {
+    const item = addImage({
+      name: `${CHARACTER_DESIGN.shortName} ${activeZone.label}`,
+      src: activeZone.currentImage,
+      url: activeZone.currentImage,
+      mediaPath: activeZone.currentImage,
+      provider: activeZone.updatedAt ? "cloud" : "studio-design",
+      tag: "studio",
+    });
+    navigate("/create", { fromImage: item.id });
+  };
+
+  const askBot = () => {
+    const message = buildZoneBotMessage(activeZone, activeInstruction);
+    const referencedText = buildZoneContext(activeZone, activeInstruction);
+    updateCharacterDesign(CHARACTER_DESIGN.id, (current) => ({
+      activeZoneId: activeZone.id,
+      zones: {
+        ...(current.zones || {}),
+        [activeZone.id]: {
+          ...(current.zones?.[activeZone.id] || {}),
+          botRequestedAt: Date.now(),
+          lastBotPrompt: activeInstruction,
+        },
+      },
+    }));
+    window.dispatchEvent(new CustomEvent("studio:zouk-compose", {
+      detail: {
+        message,
+        referencedText,
+        sourceUrl: characterDesignDeepLink(activeZone.id),
+        autoSend: true,
+      },
+    }));
+    show(`Sent ${activeZone.label} to Studio bot`);
+  };
+
+  const copyPrompt = async () => {
+    const message = buildZoneBotMessage(activeZone, activeInstruction);
+    try {
+      await navigator.clipboard.writeText(message);
+      show("Bot prompt copied");
+    } catch {
+      show(message);
+    }
+  };
+
+  return (
+    <div className="page-shell wide character-design-page">
+      {node}
+      <header className="character-design-hero">
+        <div className="character-design-title">
+          <div className="mono muted">{CHARACTER_DESIGN.sourcePackagePath}</div>
+          <h1 className="display">Character Design</h1>
+          <div className="character-design-name">
+            <span>{CHARACTER_DESIGN.code}</span>
+            <strong>{CHARACTER_DESIGN.name}</strong>
+          </div>
+          <div className="character-design-chips">
+            <span>{zones.length} zones</span>
+            <span>{updatedZones} updated</span>
+            <span>Identity locked</span>
+          </div>
+        </div>
+        <div className="character-design-sheet">
+          <img src={CHARACTER_DESIGN.generatedSheet} alt={`${CHARACTER_DESIGN.shortName} generated identity sheet`} />
+          <div className="character-design-sheet-meta">
+            <span>1531x1018</span>
+            <strong>VLM crop sheet</strong>
+          </div>
+        </div>
+      </header>
+
+      <div className="character-design-layout">
+        <aside className="character-dossier surface">
+          <div className="character-source">
+            <img src={CHARACTER_DESIGN.sourceCard} alt={`${CHARACTER_DESIGN.shortName} source`} />
+          </div>
+          <div>
+            <div className="label">Identity dossier</div>
+            <CharacterSpecRows rows={CHARACTER_DESIGN.spec} />
+          </div>
+          <div>
+            <div className="label">Continuity lock</div>
+            <div className="character-contract">
+              {CHARACTER_DESIGN.identityContract.map((line) => <p key={line}>{line}</p>)}
+            </div>
+          </div>
+        </aside>
+
+        <section className="character-zone-board">
+          <div className="character-zone-toolbar">
+            <SectionHeader title="Identity Graph" sub={activeZone.group} count={zones.length} />
+          </div>
+          <div className="character-zone-grid">
+            {zones.map((zone) => (
+              <button
+                key={zone.id}
+                className={"character-zone-card" + (zone.id === activeZone.id ? " active" : "")}
+                onClick={() => selectZone(zone.id)}
+              >
+                <div className="character-zone-img" style={{ aspectRatio: zone.aspect }}>
+                  <img src={zone.currentImage} alt={`${CHARACTER_DESIGN.shortName} ${zone.label}`} />
+                </div>
+                <div className="character-zone-meta">
+                  <div>
+                    <span>{zone.id}</span>
+                    <strong>{zone.label}</strong>
+                  </div>
+                  {zone.updatedAt ? <em>updated</em> : <em>seed</em>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <aside className="character-bot-panel surface">
+          <div className="character-bot-preview">
+            <img src={activeZone.currentImage} alt={`${activeZone.label} selected`} />
+          </div>
+          <div>
+            <div className="character-zone-kicker mono">{activeZone.id}</div>
+            <h2 className="display">{activeZone.label}</h2>
+            <p className="character-zone-role">{activeZone.role}</p>
+          </div>
+
+          <div className="character-crop-readout">
+            <span>crop</span>
+            <strong>[{activeZone.crop.join(", ")}]</strong>
+          </div>
+
+          <div>
+            <label className="label">Codex request</label>
+            <textarea
+              className="textarea character-bot-textarea"
+              value={activeInstruction}
+              onChange={(e) => setZoneDrafts((drafts) => ({ ...drafts, [activeZone.id]: e.target.value }))}
+            />
+          </div>
+
+          <div className="character-bot-actions">
+            <button className="btn btn-primary" onClick={askBot}>
+              <Icon name="message" size={14} /> Ask bot
+            </button>
+            <button className="btn" onClick={copyPrompt}>
+              <Icon name="copy" size={14} /> Copy prompt
+            </button>
+          </div>
+
+          <div className="character-zone-actions">
+            <button className="btn" onClick={addZoneToLibrary}>
+              <Icon name="sparkle" size={14} /> Use in Create
+            </button>
+            <button className="btn btn-ghost" onClick={resetActiveZone} disabled={!activeZone.updatedAt}>
+              <Icon name="refresh" size={14} /> Reset zone
+            </button>
+          </div>
+
+          <div>
+            <label className="label">{replacingZone === activeZone.id ? "Uploading" : "Replace image"}</label>
+            <DropZone
+              compact
+              image={null}
+              onFile={replaceZoneImage}
+              allowDrag
+              hint={replacingZone === activeZone.id ? "Uploading zone" : `Drop ${activeZone.label}`}
+            />
+          </div>
+
+          {activeZone.botRequestedAt && (
+            <div className="character-bot-status">
+              <span>bot</span>
+              <strong>{relTime(activeZone.botRequestedAt)}</strong>
+            </div>
+          )}
+        </aside>
+      </div>
     </div>
   );
 }

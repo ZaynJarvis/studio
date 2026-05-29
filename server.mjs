@@ -53,11 +53,12 @@ const maxAudioBytes = Number(process.env.MAX_AUDIO_BYTES || 15 * 1024 * 1024);
 const maxJsonBodyBytes = Number(process.env.MAX_JSON_BODY_BYTES || Math.ceil(Math.max(maxImageBytes, maxAudioBytes) * 1.5) + 1024 * 1024);
 const maxArtifactBytes = Number(process.env.MAX_ARTIFACT_BYTES || 500 * 1024 * 1024);
 const imageRepoBaseUrl = (
+  process.env.CLOUD_REPO_BASE_URL ||
   process.env.IMAGE_REPO_BASE_URL ||
   process.env.IMAGEREPO_BASE_URL ||
-  "https://image.zaynjarvis.com"
+  "https://cloud.zaynjarvis.com"
 ).replace(/\/+$/, "");
-const imageRepoUploadKey = process.env.IMAGE_REPO_UPLOAD_KEY || process.env.IMAGEREPO_UPLOAD_KEY || process.env.MCP_TOKEN || "";
+const imageRepoUploadKey = process.env.CLOUD_REPO_UPLOAD_KEY || process.env.IMAGE_REPO_UPLOAD_KEY || process.env.IMAGEREPO_UPLOAD_KEY || process.env.MCP_TOKEN || "";
 const imageRepoTag = (process.env.IMAGE_REPO_TAG || process.env.IMAGEREPO_TAG || "studio").trim();
 const shutdownGraceMs = clampInt(process.env.SHUTDOWN_GRACE_MS, 1_000, 60_000, 20_000);
 
@@ -802,10 +803,10 @@ function persistInputAudio(audioUrl, baseUrl = publicBaseUrl, label = "Reference
 
 function assertImageRepoConfigured() {
   if (!imageRepoBaseUrl) {
-    throw httpError(500, "image_repo_missing", "IMAGE_REPO_BASE_URL is required for image uploads.");
+    throw httpError(500, "image_repo_missing", "CLOUD_REPO_BASE_URL or IMAGE_REPO_BASE_URL is required for image uploads.");
   }
   if (!imageRepoUploadKey) {
-    throw httpError(500, "image_repo_key_missing", "IMAGE_REPO_UPLOAD_KEY is required for image uploads.");
+    throw httpError(500, "image_repo_key_missing", "CLOUD_REPO_UPLOAD_KEY or IMAGE_REPO_UPLOAD_KEY is required for image uploads.");
   }
 }
 
@@ -820,7 +821,7 @@ async function uploadImageToRepo(imageUrl, name, label = "Image") {
 
   const filename = cleanImageUploadName(name, decoded.ext);
   const form = new FormData();
-  form.append("image", new Blob([decoded.buffer], { type: decoded.mime }), filename);
+  form.append("file", new Blob([decoded.buffer], { type: decoded.mime }), filename);
   if (imageRepoTag) form.append("tag", imageRepoTag);
 
   const response = await fetch(`${imageRepoBaseUrl}/api/upload`, {
@@ -836,12 +837,12 @@ async function uploadImageToRepo(imageUrl, name, label = "Image") {
     throw httpError(
       response.status || 502,
       payload?.error?.code || "image_repo_upload_failed",
-      payload?.error?.message || payload?.error || `Image repository upload failed with HTTP ${response.status}.`,
+      payload?.error?.message || payload?.error || `Cloud upload failed with HTTP ${response.status}.`,
       payload
     );
   }
   if (!payload?.url) {
-    throw httpError(502, "image_repo_bad_response", "Image repository did not return a URL.", payload);
+    throw httpError(502, "image_repo_bad_response", "Cloud did not return a URL.", payload);
   }
 
   return {
@@ -851,10 +852,47 @@ async function uploadImageToRepo(imageUrl, name, label = "Image") {
     key: payload.key || null,
     bytes: payload.size ?? decoded.buffer.length,
     mime: payload.contentType || decoded.mime,
+    mediaType: payload.mediaType || "image",
     tag: payload.tag || imageRepoTag || "",
     duplicate: Boolean(payload.duplicate),
-    provider: "imagerepo",
+    provider: "cloud",
   };
+}
+
+function encodeCloudKeyPath(key) {
+  return String(key || "")
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+}
+
+async function deleteImageFromRepo(key) {
+  const cleanKey = String(key || "").trim();
+  if (!cleanKey) {
+    throw httpError(400, "image_key_required", "Image key is required.");
+  }
+
+  assertImageRepoConfigured();
+
+  const response = await fetch(`${imageRepoBaseUrl}/api/images/${encodeCloudKeyPath(cleanKey)}`, {
+    method: "DELETE",
+    headers: {
+      "x-upload-key": imageRepoUploadKey,
+    },
+  });
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw httpError(
+      response.status || 502,
+      payload?.error?.code || "image_repo_delete_failed",
+      payload?.error?.message || payload?.error || `Cloud delete failed with HTTP ${response.status}.`,
+      payload
+    );
+  }
+
+  return payload;
 }
 
 function cleanImageUploadName(name, fallbackExt) {
@@ -884,6 +922,7 @@ function uploadedImagePayload(persisted, name) {
     duplicate: Boolean(persisted.duplicate),
     bytes: persisted.bytes,
     mime: persisted.mime,
+    mediaType: persisted.mediaType || "image",
     added_at: Date.now(),
   };
 }
@@ -915,7 +954,7 @@ function repoImagePayload(image) {
     path: null,
     key: key || null,
     tag: tag || null,
-    provider: "imagerepo",
+    provider: "cloud",
     cloud: true,
     bytes: image?.size ?? image?.bytes ?? null,
     mime: image?.contentType || image?.content_type || null,
@@ -929,6 +968,7 @@ async function listImagesFromRepo({ limit = 100, cursor = "", tag = imageRepoTag
 
   const endpoint = new URL(`${imageRepoBaseUrl}/api/images`);
   endpoint.searchParams.set("limit", String(limit));
+  endpoint.searchParams.set("type", "image");
   if (cursor) endpoint.searchParams.set("cursor", cursor);
   if (tag) endpoint.searchParams.set("tag", tag);
 
@@ -943,7 +983,7 @@ async function listImagesFromRepo({ limit = 100, cursor = "", tag = imageRepoTag
     throw httpError(
       response.status || 502,
       payload?.error?.code || "image_repo_list_failed",
-      payload?.error?.message || payload?.error || `Image repository list failed with HTTP ${response.status}.`,
+      payload?.error?.message || payload?.error || `Cloud list failed with HTTP ${response.status}.`,
       payload
     );
   }
@@ -953,7 +993,7 @@ async function listImagesFromRepo({ limit = 100, cursor = "", tag = imageRepoTag
     nextCursor: payload.nextCursor || null,
     total: payload.total ?? null,
     tag,
-    provider: "imagerepo",
+    provider: "cloud",
   };
 }
 
@@ -1562,6 +1602,11 @@ async function handleListImages(req, res, url) {
   sendJson(res, 200, await listImagesFromRepo({ limit, cursor, tag }));
 }
 
+async function handleDeleteImage(req, res, key) {
+  const payload = await deleteImageFromRepo(key);
+  sendJson(res, 200, { deleted: true, ...payload });
+}
+
 async function createVideoTask(rawInput, mediaBaseUrl = publicBaseUrl) {
   if (isShuttingDown) {
     throw httpError(503, "server_shutting_down", "Server is shutting down. Retry on the next deployment.");
@@ -1857,7 +1902,7 @@ function mcpTools() {
   return [
     {
       name: "upload_image",
-      description: "Upload a JPEG/PNG/WEBP data URL to Studio's image library. The server stores it in imagerepo with IMAGE_REPO_TAG=studio and returns the public image URL.",
+      description: "Upload a JPEG/PNG/WEBP data URL to Studio's image library. The server stores it in Cloud with IMAGE_REPO_TAG=studio and returns the public image URL.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2121,6 +2166,12 @@ async function routeApi(req, res, url) {
 
     if (url.pathname === "/api/images" && req.method === "GET") {
       await handleListImages(req, res, url);
+      return true;
+    }
+
+    const imageMatch = url.pathname.match(/^\/api\/images\/(.+)$/);
+    if (imageMatch && req.method === "DELETE") {
+      await handleDeleteImage(req, res, decodeURIComponent(imageMatch[1]));
       return true;
     }
 

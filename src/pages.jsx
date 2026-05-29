@@ -158,8 +158,12 @@ function imageFromUploadResponse(data, fallback = {}) {
     url: image.url || src,
     mediaPath: image.media_path || fallback.mediaPath,
     path: image.path || fallback.path,
+    key: image.key || fallback.key || null,
+    tag: image.tag || fallback.tag || null,
+    provider: image.provider || fallback.provider || "cloud",
     bytes: image.bytes || fallback.bytes,
     mime: image.mime || fallback.mime,
+    mediaType: image.mediaType || image.media_type || fallback.mediaType || "image",
     addedAt: image.added_at || fallback.addedAt || Date.now(),
     cloud: true,
   };
@@ -174,14 +178,14 @@ function imageFromListResponse(image) {
 
   return {
     id: image.id || image.key || src,
-    name: image.name || image.filename || "imagerepo image",
+    name: image.name || image.filename || "cloud image",
     src,
     url: image.url || src,
     mediaPath: image.mediaPath || image.media_path || image.url || src,
     path: image.path || null,
     key: image.key || null,
     tag: image.tag || null,
-    provider: image.provider || "imagerepo",
+    provider: image.provider || "cloud",
     bytes: image.bytes || image.size || null,
     mime: image.mime || image.contentType || image.content_type || null,
     addedAt,
@@ -217,6 +221,34 @@ async function deleteRemoteTask(v) {
       throw error;
     }
   }
+}
+
+function encodeCloudKeyPath(key) {
+  return String(key || "")
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+}
+
+function cloudKeyFromImage(img) {
+  const key = String(img?.key || "").trim();
+  if (key) return key;
+  const src = String(img?.url || img?.src || "");
+  try {
+    const url = new URL(src, window.location.href);
+    const match = url.pathname.match(/^\/i\/(.+)$/);
+    return match ? decodeURIComponent(match[1]) : "";
+  } catch {
+    return "";
+  }
+}
+
+async function deleteImageAsset(img) {
+  const key = cloudKeyFromImage(img);
+  if (!key) return false;
+  await fetchJson(`/api/images/${encodeCloudKeyPath(key)}`, { method: "DELETE" });
+  return true;
 }
 
 function isAppleTouchDevice() {
@@ -1457,7 +1489,16 @@ export function LibraryPage() {
                 onClick={() => navigate("/create", { fromImage: img.id })}
               >
                 <img src={img.src} alt={img.name}/>
-                <button className="img-tile-del" onClick={(e) => { e.stopPropagation(); removeImage(img.id); show("Image removed"); }}>
+                <button className="img-tile-del" onClick={async (e) => {
+                  e.stopPropagation();
+                  try {
+                    const deletedRemote = await deleteImageAsset(img);
+                    removeImage(img.id);
+                    show(deletedRemote ? "Image moved to cloud trash" : "Image removed locally");
+                  } catch (error) {
+                    show(error.message || "Image delete failed");
+                  }
+                }}>
                   <Icon name="trash" size={12}/>
                 </button>
                 <div style={{

@@ -391,16 +391,28 @@ export function ServerTaskSync() {
 }
 
 export function RemoteImageSync() {
-  const { mergeImages } = useStore();
+  const { syncCloudImages } = useStore();
 
   useEffect(() => {
     let stopped = false;
 
     const sync = async () => {
       try {
-        const data = await fetchJson("/api/images?limit=100");
+        const images = [];
+        let cursor = "";
+        let syncTag = "";
+
+        do {
+          const params = new URLSearchParams({ limit: "120" });
+          if (cursor) params.set("cursor", cursor);
+          const data = await fetchJson(`/api/images?${params.toString()}`);
+          images.push(...((data.images || []).map(imageFromListResponse).filter(Boolean)));
+          cursor = data.nextCursor || "";
+          syncTag = data.tag || syncTag;
+        } while (cursor && !stopped);
+
         if (stopped) return;
-        mergeImages((data.images || []).map(imageFromListResponse).filter(Boolean));
+        syncCloudImages(images, { tag: syncTag || "studio" });
       } catch (error) {
         console.warn("image library sync failed", error);
       }
@@ -413,7 +425,7 @@ export function RemoteImageSync() {
       stopped = true;
       window.removeEventListener("focus", sync);
     };
-  }, [mergeImages]);
+  }, [syncCloudImages]);
 
   return null;
 }

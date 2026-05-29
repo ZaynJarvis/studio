@@ -46,6 +46,31 @@ function imageKeys(img) {
     .filter(Boolean);
 }
 
+function normaliseLibraryImage(img) {
+  return {
+    addedAt: img.addedAt || img.added_at || Date.now(),
+    ...img,
+    src: img.src || img.url,
+    url: img.url || img.src,
+    mediaPath: img.mediaPath || img.media_path || img.url || img.src,
+  };
+}
+
+function tagFromCloudKey(key) {
+  const parts = String(key || "").split("/");
+  if (parts.length >= 3 && parts[1] && parts[1] !== "sha256") return parts[1];
+  return "";
+}
+
+function isCloudImageForTag(img, tag) {
+  const isCloud = img?.cloud || img?.provider === "cloud" || Boolean(img?.key);
+  if (!isCloud) return false;
+  if (!tag) return true;
+
+  const imageTag = String(img?.tag || tagFromCloudKey(img?.key) || "").trim();
+  return imageTag === tag;
+}
+
 const StoreCtx = createContext(null);
 
 export function StoreProvider({ children }) {
@@ -57,9 +82,9 @@ export function StoreProvider({ children }) {
 
   const addImage = useCallback((img) => {
     const item = {
+      ...img,
       id: "i_" + Math.random().toString(36).slice(2, 9),
       addedAt: Date.now(),
-      ...img,
     };
     setState((s) => ({ ...s, images: [item, ...s.images] }));
     return item;
@@ -79,13 +104,7 @@ export function StoreProvider({ children }) {
   const mergeImages = useCallback((images) => {
     const incoming = (Array.isArray(images) ? images : [])
       .filter((img) => img?.src || img?.url)
-      .map((img) => ({
-        addedAt: img.addedAt || img.added_at || Date.now(),
-        ...img,
-        src: img.src || img.url,
-        url: img.url || img.src,
-        mediaPath: img.mediaPath || img.media_path || img.url || img.src,
-      }));
+      .map(normaliseLibraryImage);
 
     if (!incoming.length) return;
 
@@ -102,6 +121,36 @@ export function StoreProvider({ children }) {
 
       if (!additions.length) return s;
       return { ...s, images: [...additions, ...s.images] };
+    });
+  }, []);
+
+  const syncCloudImages = useCallback((images, { tag = "" } = {}) => {
+    const incoming = (Array.isArray(images) ? images : [])
+      .filter((img) => img?.src || img?.url)
+      .map(normaliseLibraryImage);
+
+    setState((s) => {
+      const remoteKeys = new Set(incoming.flatMap(imageKeys));
+      const seen = new Set(remoteKeys);
+      const local = [];
+
+      for (const img of s.images) {
+        const keys = imageKeys(img);
+        const syncedCloudImage = isCloudImageForTag(img, tag);
+
+        if (syncedCloudImage && !keys.some((key) => remoteKeys.has(key))) {
+          continue;
+        }
+
+        if (keys.some((key) => seen.has(key))) {
+          continue;
+        }
+
+        local.push(img);
+        keys.forEach((key) => seen.add(key));
+      }
+
+      return { ...s, images: [...incoming, ...local] };
     });
   }, []);
 
@@ -145,8 +194,8 @@ export function StoreProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ state, setApiKey, addImage, removeImage, updateImage, mergeImages, addVideo, removeVideo, updateVideo, upsertVideo }),
-    [state, setApiKey, addImage, removeImage, updateImage, mergeImages, addVideo, removeVideo, updateVideo, upsertVideo]
+    () => ({ state, setApiKey, addImage, removeImage, updateImage, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo }),
+    [state, setApiKey, addImage, removeImage, updateImage, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo]
   );
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;

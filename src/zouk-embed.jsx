@@ -8,7 +8,7 @@ const CONFIG = {
   guestName: import.meta.env.VITE_ZOUK_GUEST_NAME || 'studio-reader',
 };
 
-const BROWSER_ID_KEY = 'videogen.zouk.browserId';
+const BROWSER_ID_KEY = 'studio.zouk.browserId';
 
 function browserAvailable() {
   return typeof window !== 'undefined' && typeof document !== 'undefined';

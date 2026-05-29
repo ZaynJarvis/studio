@@ -1794,7 +1794,7 @@ async function handleDeleteTask(req, res, id) {
 
 async function handleArkWebhook(req, res, url) {
   if (webhookToken) {
-    const provided = url.searchParams.get("token") || req.headers["x-videogen-webhook-token"] || "";
+    const provided = url.searchParams.get("token") || req.headers["x-studio-webhook-token"] || req.headers["x-videogen-webhook-token"] || "";
     if (provided !== webhookToken) {
       sendJson(res, 401, { error: { code: "unauthorized", message: "Invalid webhook token." } });
       return;
@@ -1990,7 +1990,7 @@ async function handleMcpRpc(message) {
         result: {
           protocolVersion: params.protocolVersion || "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "videogen", version: "1.0.0" },
+          serverInfo: { name: "studio", version: "1.0.0" },
         },
       };
     }
@@ -2525,7 +2525,7 @@ server.on("connection", (socket) => {
 });
 
 server.listen(port, "0.0.0.0", () => {
-  console.log(`videogen listening on :${port}`);
+  console.log(`studio listening on :${port}`);
   console.log(`task store: ${tasksFile}`);
   console.log(`artifact store: ${artifactsDir}`);
   console.log(`task monitor mode: ${monitorMode}`);

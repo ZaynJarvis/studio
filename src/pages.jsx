@@ -261,7 +261,7 @@ function videoMimeFromExtension(ext) {
 }
 
 function videoFileName(v) {
-  const fallback = String(v?.taskId || v?.id || "videogen-render").slice(0, 24) || "videogen-render";
+  const fallback = String(v?.taskId || v?.id || "studio-render").slice(0, 24) || "studio-render";
   const base = String(v?.title || fallback)
     .normalize("NFKD")
     .replace(/[^a-z0-9]+/gi, "-")

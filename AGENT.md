@@ -1,4 +1,4 @@
-# VideoGen Studio
+# Studio
 
 AI video generation studio powered by ByteDance Ark / Seedance 2.0 Pro. Cinema-noir themed single-page React app with localStorage persistence.
 

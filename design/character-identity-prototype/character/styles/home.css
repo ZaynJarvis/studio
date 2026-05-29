@@ -1,0 +1,228 @@
+/* Home / roster page */
+
+.home {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* hero — editorial banner */
+.home-hero {
+  padding: 56px 48px 28px;
+  display: grid;
+  grid-template-columns: 1.4fr .9fr;
+  gap: 48px;
+  align-items: end;
+  border-bottom: 1px solid var(--line-soft);
+}
+.home-hero h1 {
+  font-family: var(--f-display);
+  font-weight: 400;
+  font-size: clamp(54px, 7vw, 96px);
+  line-height: .95;
+  letter-spacing: -.02em;
+  margin: 0;
+  color: var(--ink);
+}
+.home-hero h1 em { font-style: italic; color: var(--ink-2); }
+.home-hero .lead {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  max-width: 46ch;
+  margin-top: 18px;
+}
+.home-hero .meta {
+  display: flex; flex-direction: column; gap: 14px;
+  padding-bottom: 6px;
+  font-family: var(--f-mono);
+}
+.home-hero .meta-row { display: flex; gap: 24px; }
+.home-hero .meta dl { margin: 0; }
+.home-hero .meta dt { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-mute); }
+.home-hero .meta dd { font-size: 13px; margin: 4px 0 0; color: var(--ink); }
+.home-hero .meta dd .num { font-family: var(--f-display); font-size: 32px; line-height: 1; }
+
+/* sub bar */
+.home-subbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 48px;
+  border-bottom: 1px solid var(--line-soft);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.home-subbar .left { display: flex; gap: 18px; align-items: center; }
+.home-subbar .seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.home-subbar .seg button {
+  padding: 5px 12px;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  border-right: 1px solid var(--line);
+}
+.home-subbar .seg button:last-child { border-right: none; }
+.home-subbar .seg button.on { background: var(--ink); color: var(--paper); }
+
+/* grid */
+.home-grid {
+  padding: 32px 48px 72px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 24px;
+}
+
+/* character card */
+.char-card {
+  display: grid;
+  grid-template-rows: auto auto auto;
+  background: var(--card);
+  border: 1px solid var(--ink);
+  border-radius: var(--radius);
+  overflow: hidden;
+  text-decoration: none;
+  color: var(--ink);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+  position: relative;
+}
+.char-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.char-card .ph {
+  aspect-ratio: 3 / 4;
+  background: var(--paper-deep);
+  background-size: cover;
+  background-position: center top;
+  position: relative;
+}
+.char-card .ph::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(0,0,0,0) 60%, rgba(0,0,0,.18) 100%);
+}
+.char-card .id-stamp {
+  position: absolute; top: 10px; left: 10px;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: .14em;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  padding: 3px 7px;
+  border-radius: 3px;
+}
+.char-card .lock {
+  position: absolute; top: 10px; right: 10px;
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  letter-spacing: .12em;
+  padding: 3px 7px;
+  border-radius: 3px;
+  background: var(--accent);
+  color: #fff;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.char-card .lock.off { background: var(--paper); color: var(--ink-mute); border: 1px solid var(--line); }
+
+.char-card .body {
+  padding: 14px 16px 12px;
+  border-top: 1px solid var(--ink);
+}
+.char-card .name {
+  font-family: var(--f-display);
+  font-size: 26px;
+  line-height: 1.1;
+  letter-spacing: -.005em;
+}
+.char-card .tagline {
+  font-size: 12.5px;
+  color: var(--ink-mute);
+  margin-top: 4px;
+}
+.char-card .specrow {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  color: var(--ink-2);
+}
+.char-card .specrow span { display: flex; gap: 6px; }
+.char-card .specrow span b { color: var(--ink-mute); font-weight: 500; min-width: 38px; text-transform: uppercase; font-size: 9.5px; letter-spacing: .14em; }
+
+.char-card .foot {
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.char-card .fill {
+  display: flex; align-items: center; gap: 8px;
+}
+.char-card .fill-bar {
+  width: 60px; height: 4px; background: var(--paper-deep); border-radius: 2px; overflow: hidden;
+}
+.char-card .fill-bar > i {
+  display: block; height: 100%; background: var(--accent);
+}
+
+/* new card */
+.char-card.new {
+  border-style: dashed;
+  border-color: var(--ink-faint);
+  background: transparent;
+  display: grid;
+  place-items: center;
+  min-height: 460px;
+  text-align: center;
+  cursor: pointer;
+}
+.char-card.new:hover { border-color: var(--ink); background: var(--card); }
+.char-card.new .plus {
+  width: 56px; height: 56px;
+  border: 1.5px solid var(--ink);
+  border-radius: 50%;
+  display: grid; place-items: center;
+  font-family: var(--f-display);
+  font-size: 36px;
+  line-height: 1;
+  margin: 0 auto 14px;
+}
+.char-card.new .label {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+.char-card.new .sub {
+  font-size: 12px;
+  color: var(--ink-mute);
+  margin-top: 6px;
+  max-width: 22ch;
+}
+
+/* footer */
+.home-footer {
+  padding: 22px 48px;
+  border-top: 1px solid var(--line-soft);
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}

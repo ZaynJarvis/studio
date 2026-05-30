@@ -40,8 +40,8 @@ const arkTitleModels = uniqueTitleModels([
   "doubao-seed-2-0-pro-260215",
   "doubao-seed-1-6-vision-250815",
 ]);
-const arkImageModel = process.env.ARK_IMAGE_MODEL || process.env.ARK_IMAGE_GEN_MODEL || "doubao-seedream-5-0-260128";
-const arkImageSize = process.env.ARK_IMAGE_SIZE || "1920x1920";
+const arkImageModel = process.env.ARK_IMAGE_MODEL || process.env.ARK_IMAGE_GEN_MODEL || "ep-20260309164315-zbvxd";
+const arkImageSize = process.env.ARK_IMAGE_SIZE || "2K";
 const arkImageTimeoutMs = Number(process.env.ARK_IMAGE_TIMEOUT_MS || 120_000);
 const arkImagePromptModels = uniqueTitleModels([
   process.env.ARK_IMAGE_PROMPT_MODEL,
@@ -944,8 +944,10 @@ function normalizeTextList(value) {
 }
 
 function normalizeImageSize(value) {
-  const raw = String(value || arkImageSize || "").trim().toLowerCase();
-  return /^\d{3,5}x\d{3,5}$/.test(raw) ? raw : "1920x1920";
+  const raw = String(value || arkImageSize || "").trim();
+  if (/^\d{3,5}x\d{3,5}$/i.test(raw)) return raw.toLowerCase();
+  if (/^[1-4]k$/i.test(raw)) return raw.toUpperCase();
+  return "2K";
 }
 
 function cleanModelText(value, max = 1600) {

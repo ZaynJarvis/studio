@@ -630,7 +630,6 @@ export function CharacterDesignPage() {
           source_image_url: CHARACTER_DESIGN.sourceCard,
           reference_image_url: activeZone.referenceImage || CHARACTER_DESIGN.sourceCard,
           current_image_url: activeZone.currentImage,
-          size: "1920x1920",
         }),
       });
       const remote = imageFromUploadResponse(data, {

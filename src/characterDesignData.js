@@ -171,5 +171,17 @@ export const CHARACTER_DESIGN = {
   zones: CHARACTER_ZONE_DEFS,
 };
 
+export const GENERIC_ZONE_DEFS = [
+  { id: "full_front", group: "body", label: "Full Front", role: "front full-body view", aspect: "3 / 4", prompt: "Full-body front view, standing upright, facing the camera directly, entire figure head-to-toe in frame." },
+  { id: "full_side", group: "body", label: "Full Side", role: "left side full-body view", aspect: "3 / 4", prompt: "Full-body left-side profile view, standing, entire figure in frame." },
+  { id: "full_back", group: "body", label: "Full Back", role: "back full-body view", aspect: "3 / 4", prompt: "Full-body back view, standing, entire figure in frame." },
+  { id: "half_body", group: "body", label: "Half Body", role: "waist-up portrait", aspect: "3 / 4", prompt: "Waist-up three-quarter portrait, relaxed neutral pose." },
+  { id: "face_front", group: "face", label: "Face Front", role: "front face close-up", aspect: "1 / 1", prompt: "Head-and-shoulders face close-up, front view, neutral calm expression, sharp facial detail." },
+  { id: "face_left", group: "face", label: "Face 3/4 L", role: "left three-quarter face", aspect: "1 / 1", prompt: "Head-and-shoulders face close-up, three-quarter left view, same neutral expression." },
+  { id: "face_right", group: "face", label: "Face 3/4 R", role: "right three-quarter face", aspect: "1 / 1", prompt: "Head-and-shoulders face close-up, three-quarter right view, same neutral expression." },
+  { id: "expression", group: "face", label: "Expression", role: "smiling expression", aspect: "1 / 1", prompt: "Head-and-shoulders face close-up, front view, warm happy smiling expression." },
+  { id: "outfit", group: "detail", label: "Outfit", role: "outfit & accessories detail", aspect: "3 / 4", prompt: "Three-quarter body view emphasizing the full outfit, clothing, and accessories." },
+];
+
 export const CHARACTER_DESIGNS = [CHARACTER_DESIGN];
 export const DEFAULT_CHARACTER_DESIGN = CHARACTER_DESIGN;

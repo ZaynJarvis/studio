@@ -118,6 +118,14 @@ export function StoreProvider({ children }) {
     });
   }, []);
 
+  const removeCharacterDesign = useCallback((id) => {
+    setState((s) => {
+      const next = { ...(s.characterDesigns || {}) };
+      delete next[id];
+      return { ...s, characterDesigns: next };
+    });
+  }, []);
+
   const mergeImages = useCallback((images) => {
     const incoming = (Array.isArray(images) ? images : [])
       .filter((img) => img?.src || img?.url)
@@ -211,8 +219,8 @@ export function StoreProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ state, setApiKey, addImage, removeImage, updateImage, updateCharacterDesign, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo }),
-    [state, setApiKey, addImage, removeImage, updateImage, updateCharacterDesign, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo]
+    () => ({ state, setApiKey, addImage, removeImage, updateImage, updateCharacterDesign, removeCharacterDesign, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo }),
+    [state, setApiKey, addImage, removeImage, updateImage, updateCharacterDesign, removeCharacterDesign, mergeImages, syncCloudImages, addVideo, removeVideo, updateVideo, upsertVideo]
   );
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;

@@ -43,6 +43,8 @@ const arkTitleModels = uniqueTitleModels([
 const arkImageModel = process.env.ARK_IMAGE_MODEL || process.env.ARK_IMAGE_GEN_MODEL || "ep-20260309164315-zbvxd";
 const arkImageSize = process.env.ARK_IMAGE_SIZE || "2K";
 const arkImageTimeoutMs = Number(process.env.ARK_IMAGE_TIMEOUT_MS || 120_000);
+const arkImageGridTimeoutMs = Number(process.env.ARK_IMAGE_GRID_TIMEOUT_MS || 300_000);
+const arkImageGridMaxImages = clampInt(process.env.ARK_IMAGE_GRID_MAX_IMAGES, 1, 15, 12);
 const arkImagePromptModels = uniqueTitleModels([
   process.env.ARK_IMAGE_PROMPT_MODEL,
   process.env.ARK_VLM_TITLE_MODEL,
@@ -1167,6 +1169,52 @@ async function imageUrlToDataUrl(imageUrl, label = "Image", signal = undefined) 
   return `data:${contentType};base64,${buffer.toString("base64")}`;
 }
 
+async function persistGeneratedImage(generated, name, tag, signal) {
+  let dataUrl = generated.dataUrl || null;
+  let persisted = null;
+  let persistError = null;
+  if (!dataUrl && imageRepoUploadKey) {
+    try {
+      dataUrl = await imageUrlToDataUrl(generated.url, "Generated image", signal);
+    } catch (error) {
+      persistError = publicError(error);
+      console.warn("character generated image fetch failed", persistError);
+    }
+  }
+  if (dataUrl && imageRepoUploadKey) {
+    try {
+      persisted = await uploadImageToRepo(dataUrl, name, "Generated character image", tag);
+    } catch (error) {
+      persistError = publicError(error);
+      console.warn("character image cloud persistence failed", persistError);
+    }
+  }
+
+  const fallbackImage = {
+    id: `i_${randomUUID()}`,
+    name,
+    src: persisted?.url || generated.url || dataUrl,
+    url: persisted?.url || generated.url || dataUrl,
+    media_path: persisted?.mediaPath || generated.url || null,
+    path: persisted?.path || null,
+    key: persisted?.key || null,
+    tag: persisted?.tag || imageRepoTag || null,
+    provider: persisted ? "cloud" : "ark",
+    bytes: persisted?.bytes || null,
+    mime: persisted?.mime || null,
+    media_type: "image",
+    cloud: Boolean(persisted),
+    temporary: !persisted,
+  };
+
+  return {
+    image: persisted ? uploadedImagePayload(persisted, name) : fallbackImage,
+    persisted: Boolean(persisted),
+    temporary: !persisted,
+    persistError,
+  };
+}
+
 async function generateCharacterZoneImage(rawInput, mediaBaseUrl = publicBaseUrl) {
   const context = characterZoneContext(rawInput, mediaBaseUrl);
   const controller = new AbortController();
@@ -1183,6 +1231,10 @@ async function generateCharacterZoneImage(rawInput, mediaBaseUrl = publicBaseUrl
       n: 1,
       response_format: "url",
     };
+    if (context.referenceUrls.length) {
+      requestBody.image = context.referenceUrls.slice(0, 4);
+      requestBody.sequential_image_generation = "disabled";
+    }
     if (context.seed >= 0) requestBody.seed = context.seed;
 
     const raw = await arkFetch("/images/generations", {
@@ -1191,47 +1243,12 @@ async function generateCharacterZoneImage(rawInput, mediaBaseUrl = publicBaseUrl
       body: JSON.stringify(requestBody),
     });
     const generated = extractGeneratedImage(raw);
-    let dataUrl = generated.dataUrl || null;
     const name = cleanImageUploadName(
       `${context.characterName || "character"}-${context.zoneId}-${Date.now()}.jpg`,
       ".jpg"
     );
 
-    let persisted = null;
-    let persistError = null;
-    if (!dataUrl && imageRepoUploadKey) {
-      try {
-        dataUrl = await imageUrlToDataUrl(generated.url, "Generated image", controller.signal);
-      } catch (error) {
-        persistError = publicError(error);
-        console.warn("character generated image fetch failed", persistError);
-      }
-    }
-    if (dataUrl && imageRepoUploadKey) {
-      try {
-        persisted = await uploadImageToRepo(dataUrl, name, "Generated character zone", context.tag);
-      } catch (error) {
-        persistError = publicError(error);
-        console.warn("character image cloud persistence failed", persistError);
-      }
-    }
-
-    const fallbackImage = {
-      id: `i_${randomUUID()}`,
-      name,
-      src: persisted?.url || generated.url || dataUrl,
-      url: persisted?.url || generated.url || dataUrl,
-      media_path: persisted?.mediaPath || generated.url || null,
-      path: persisted?.path || null,
-      key: persisted?.key || null,
-      tag: persisted?.tag || imageRepoTag || null,
-      provider: persisted ? "cloud" : "ark",
-      bytes: persisted?.bytes || null,
-      mime: persisted?.mime || null,
-      media_type: "image",
-      cloud: Boolean(persisted),
-      temporary: !persisted,
-    };
+    const result = await persistGeneratedImage(generated, name, context.tag, controller.signal);
 
     return {
       ok: true,
@@ -1241,14 +1258,148 @@ async function generateCharacterZoneImage(rawInput, mediaBaseUrl = publicBaseUrl
       seed: context.seed,
       prompt,
       reference_prompt: referencePrompt,
-      persisted: Boolean(persisted),
-      temporary: !persisted,
-      persist_error: persistError,
-      image: persisted ? uploadedImagePayload(persisted, name) : fallbackImage,
+      persisted: result.persisted,
+      temporary: result.temporary,
+      persist_error: result.persistError,
+      image: result.image,
     };
   } catch (error) {
     if (controller.signal.aborted && !error.status) {
       throw httpError(504, "image_generation_timeout", "Character image generation timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function characterSheetContext(input, mediaBaseUrl) {
+  const characterName = String(input.character_name || input.characterName || input.name || "Character").trim();
+  const identityContract = normalizeTextList(input.identity_contract || input.identityContract);
+  const negativePrompt = String(input.negative_prompt || input.negativePrompt || "").trim();
+  const sourceUrls = normalizeUrlList([
+    input.source_image_url || input.sourceImageUrl,
+    ...(normalizeUrlList(input.source_image_urls || input.sourceImageUrls)),
+    ...(normalizeUrlList(input.reference_image_urls || input.referenceImageUrls)),
+  ]).map((u) => absoluteRequestUrl(u, mediaBaseUrl));
+  if (!sourceUrls.length) {
+    throw httpError(400, "source_required", "A source image is required to generate the identity grid.");
+  }
+  const zones = (Array.isArray(input.zones) ? input.zones : [])
+    .map((z) => ({
+      id: String(z.id || z.zone_id || "").trim(),
+      label: String(z.label || z.id || "").trim(),
+      role: String(z.role || "").trim(),
+      prompt: String(z.prompt || z.instruction || z.role || z.label || "").trim(),
+    }))
+    .filter((z) => z.id && z.prompt)
+    .slice(0, 15);
+  if (!zones.length) {
+    throw httpError(400, "zones_required", "At least one zone is required.");
+  }
+  return {
+    characterName,
+    identityContract,
+    negativePrompt,
+    sourceUrls,
+    zones,
+    size: normalizeImageSize(input.size || input.output_size),
+    seed: clampInt(input.seed, -1, 4_294_967_295, -1),
+    tag: String(input.tag || input.cloud_tag || "design").trim(),
+  };
+}
+
+function buildCharacterSheetPrompt(ctx) {
+  const contract = ctx.identityContract.length
+    ? ctx.identityContract.join(" ")
+    : "Keep the exact same single subject identity from the reference: same face, hair, body proportions, skin tone, outfit, colors, and signature details.";
+  return [
+    `Generate ${ctx.zones.length} separate, distinct photorealistic identity-reference images of the SAME single subject shown in the reference image(s). Only the camera view / framing changes between images — the subject's identity must stay identical in every one.`,
+    `Identity lock: ${contract}`,
+    `Produce exactly one image per item below, in this exact order:`,
+    ...ctx.zones.map((z, i) => `Image ${i + 1} — ${z.label}: ${z.prompt}`),
+    `Each image: a single subject only, centered, plain soft light-gray seamless studio background, even neutral studio lighting, the described framing fully in frame. No text, labels, captions, numbering, collage, side-by-side panels, split frames, watermark, or UI.`,
+    ctx.negativePrompt ? `Avoid: ${ctx.negativePrompt}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function extractGeneratedImageList(raw) {
+  const items = [
+    ...(Array.isArray(raw.data) ? raw.data : []),
+    ...(Array.isArray(raw.images) ? raw.images : []),
+  ].filter(Boolean);
+  const out = [];
+  for (const item of items) {
+    if (typeof item === "string") {
+      if (item.startsWith("data:")) out.push({ dataUrl: item });
+      else if (/^https?:\/\//i.test(item)) out.push({ url: item });
+      continue;
+    }
+    const url = item?.url || item?.image_url || item?.imageUrl || item?.output_url || item?.outputUrl;
+    if (typeof url === "string" && url) {
+      out.push({ url });
+      continue;
+    }
+    const b64 = item?.b64_json || item?.b64Json || item?.base64 || item?.image_base64;
+    if (typeof b64 === "string" && b64) {
+      const mime = item?.mime || item?.content_type || "image/jpeg";
+      out.push({ dataUrl: `data:${mime};base64,${b64.replace(/^data:[^,]+,/, "")}` });
+    }
+  }
+  return out;
+}
+
+async function generateCharacterSheet(rawInput, mediaBaseUrl = publicBaseUrl) {
+  const ctx = characterSheetContext(rawInput, mediaBaseUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), arkImageGridTimeoutMs);
+  timeout.unref?.();
+  try {
+    const prompt = buildCharacterSheetPrompt(ctx);
+    const maxImages = clampInt(ctx.zones.length, 1, arkImageGridMaxImages, ctx.zones.length);
+    const requestBody = {
+      model: arkImageModel,
+      prompt,
+      image: ctx.sourceUrls.slice(0, 10),
+      sequential_image_generation: "auto",
+      sequential_image_generation_options: { max_images: Math.max(maxImages, ctx.zones.length) },
+      response_format: "url",
+      size: ctx.size,
+      stream: false,
+      watermark: false,
+    };
+    if (ctx.seed >= 0) requestBody.seed = ctx.seed;
+    const raw = await arkFetch("/images/generations", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify(requestBody),
+    });
+    const generatedList = extractGeneratedImageList(raw);
+    const zones = [];
+    for (let i = 0; i < ctx.zones.length && i < generatedList.length; i++) {
+      const z = ctx.zones[i];
+      const name = cleanImageUploadName(`${ctx.characterName || "character"}-${z.id}-${Date.now()}.jpg`, ".jpg");
+      const r = await persistGeneratedImage(generatedList[i], name, ctx.tag, controller.signal);
+      zones.push({ zone_id: z.id, label: z.label, image: r.image, persisted: r.persisted, temporary: r.temporary, persist_error: r.persistError });
+    }
+    const returnedIds = new Set(zones.map((z) => z.zone_id));
+    const missing = ctx.zones.filter((z) => !returnedIds.has(z.id)).map((z) => z.id);
+    return {
+      ok: true,
+      model: arkImageModel,
+      size: ctx.size,
+      seed: ctx.seed,
+      prompt,
+      requested: ctx.zones.length,
+      generated: generatedList.length,
+      zones,
+      missing,
+      partial: zones.length < ctx.zones.length,
+      persisted: zones.length > 0 && zones.every((z) => z.persisted),
+    };
+  } catch (error) {
+    if (controller.signal.aborted && !error.status) {
+      throw httpError(504, "image_grid_timeout", "Identity grid generation timed out.");
     }
     throw error;
   } finally {
@@ -1933,6 +2084,11 @@ async function handleCharacterZoneImage(req, res) {
   sendJson(res, 201, payload);
 }
 
+async function handleCharacterSheet(req, res) {
+  const payload = await generateCharacterSheet(await readJson(req), publicBaseUrl || requestPublicBaseUrl(req));
+  sendJson(res, 201, payload);
+}
+
 async function handleListImages(req, res, url) {
   const limit = clampInt(url.searchParams.get("limit"), 1, 100, 100);
   const cursor = url.searchParams.get("cursor") || "";
@@ -2359,6 +2515,37 @@ function mcpTools() {
         additionalProperties: false,
       },
     },
+    {
+      name: "generate_character_sheet",
+      description: "Generate a full multi-view identity grid for a character from a source image via ARK seedream sequential image-to-image; persists each view to Cloud (default tag=design).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          source_image_url: { type: "string", description: "Source/reference image URL for the character identity." },
+          zones: {
+            type: "array",
+            description: "Zones to generate, one image per zone in order.",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", description: "Zone id." },
+                label: { type: "string", description: "Human-readable zone label." },
+                prompt: { type: "string", description: "Framing/view instruction for this zone." },
+              },
+              required: ["id", "prompt"],
+              additionalProperties: true,
+            },
+          },
+          character_name: { type: "string", description: "Character display name." },
+          identity_contract: { type: "array", items: { type: "string" }, description: "Identity contract constraints to preserve." },
+          negative_prompt: { type: "string", description: "Negative prompt describing what to avoid." },
+          size: { type: "string", description: "Optional output size, e.g. 2K." },
+          tag: { type: "string", description: "Cloud tag for the saved images (default design).", default: "design" },
+        },
+        required: ["source_image_url", "zones"],
+        additionalProperties: true,
+      },
+    },
   ];
 }
 
@@ -2429,6 +2616,11 @@ async function callMcpTool(name, args = {}) {
 
   if (name === "design_list") {
     const out = await listImagesFromRepo({ limit: clampInt(args.limit, 1, 200, 50), cursor: args.cursor || "", tag: args.tag || "design" });
+    return mcpTextResult(out);
+  }
+
+  if (name === "generate_character_sheet") {
+    const out = await generateCharacterSheet({ ...args, tag: args.tag || "design" }, publicBaseUrl);
     return mcpTextResult(out);
   }
 
@@ -2582,6 +2774,11 @@ async function routeApi(req, res, url) {
 
     if (url.pathname === "/api/character-design/zone" && req.method === "POST") {
       await handleCharacterZoneImage(req, res);
+      return true;
+    }
+
+    if (url.pathname === "/api/character-design/sheet" && req.method === "POST") {
+      await handleCharacterSheet(req, res);
       return true;
     }
 

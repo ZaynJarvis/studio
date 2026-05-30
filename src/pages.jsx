@@ -3,7 +3,7 @@ import { Icon, DropZone, VideoPlayer, GenerationProgress, useToast } from './com
 import { useStore, useHashRoute, relTime, fmtDate } from './store';
 import { authHeader, clearToken, getToken } from './auth';
 import { prepareUploadImage } from './imageUpload';
-import { CHARACTER_DESIGNS, DEFAULT_CHARACTER_DESIGN } from './characterDesignData';
+import { CHARACTER_DESIGNS, DEFAULT_CHARACTER_DESIGN, GENERIC_ZONE_DEFS } from './characterDesignData';
 
 const HOST_PARAMS = {
   resolutions: ["720p", "1080p"],
@@ -542,12 +542,12 @@ function characterFromMeta(meta = {}) {
     spec: Array.isArray(meta.spec) && meta.spec.length ? meta.spec : base.spec,
     identityContract: Array.isArray(meta.identityContract) && meta.identityContract.length ? meta.identityContract : base.identityContract,
     negativePrompt: meta.negativePrompt || base.negativePrompt,
-    zones: base.zones.map((zone) => ({
+    zones: (meta.custom ? GENERIC_ZONE_DEFS : base.zones).map((zone) => ({
       ...zone,
       image: sourceCard,
       sheetImage: sourceCard,
       referenceImage: sourceCard,
-      improvement: `Improve ${shortName}'s ${zone.label.toLowerCase()} identity zone from the uploaded reference while preserving this character as distinct from all other characters.`,
+      improvement: zone.prompt || `Improve ${shortName}'s ${zone.label.toLowerCase()} view from the uploaded reference while preserving the same identity.`,
     })),
   };
 }
@@ -611,11 +611,11 @@ function buildZoneContext(character, zone, instruction) {
     `Zone: ${zone.id} / ${zone.label}`,
     `Role: ${zone.role}`,
     `Current image: ${zone.currentImage}`,
-    `Crop box: [${zone.crop.join(", ")}] on the 1531x1018 generated sheet`,
+    zone.crop?.length ? `Crop box: [${zone.crop.join(", ")}] on the 1531x1018 generated sheet` : "",
     `Requested improvement: ${instruction}`,
     `Identity contract: ${character.identityContract.join(" ")}`,
     `Negative prompt: ${character.negativePrompt}`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function buildZoneBotMessage(character, zone, instruction) {
@@ -626,7 +626,7 @@ function buildZoneBotMessage(character, zone, instruction) {
     `Zone: ${zone.id} / ${zone.label}`,
     `Role: ${zone.role}`,
     `Current image URL: ${zone.currentImage}`,
-    `Crop box: [${zone.crop.join(", ")}] in the 1531x1018 sheet coordinate system`,
+    ...(zone.crop?.length ? [`Crop box: [${zone.crop.join(", ")}] in the 1531x1018 sheet coordinate system`] : []),
     "",
     "Change request:",
     instruction,
@@ -652,9 +652,10 @@ function CharacterSpecRows({ rows }) {
 }
 
 export function CharacterDesignPage() {
-  const { state, addImage, updateCharacterDesign } = useStore();
+  const { state, addImage, updateCharacterDesign, removeCharacterDesign } = useStore();
   const { query, navigate } = useHashRoute();
   const { show, node } = useToast();
+  const builtInIds = useMemo(() => new Set(CHARACTER_DESIGNS.map((c) => c.id)), []);
   const characters = useMemo(() => listWorkspaceCharacters(state.characterDesigns), [state.characterDesigns]);
   const selectedCharacter = useMemo(
     () => resolveWorkspaceCharacter(state.characterDesigns, query.character),
@@ -667,6 +668,7 @@ export function CharacterDesignPage() {
   const [zoneDrafts, setZoneDrafts] = useState({});
   const [replacingZone, setReplacingZone] = useState("");
   const [generatingZone, setGeneratingZone] = useState("");
+  const [generatingSheetId, setGeneratingSheetId] = useState("");
   const [addingCharacter, setAddingCharacter] = useState(false);
   const [newCharacterName, setNewCharacterName] = useState("");
   const [runtimeImage, setRuntimeImage] = useState(null);
@@ -674,6 +676,7 @@ export function CharacterDesignPage() {
   const updatedZones = zones.filter((zone) => zone.updatedAt).length;
   const activeKey = `${selectedCharacter.id}:${activeZone.id}`;
   const activeGenerating = generatingZone === activeKey;
+  const sheetGenerating = generatingSheetId === selectedCharacter.id;
 
   useEffect(() => {
     let cancelled = false;
@@ -703,6 +706,50 @@ export function CharacterDesignPage() {
     navigate("/design", { character: selectedCharacter.id, zone: zoneId });
   };
 
+  const runSheetGeneration = async (character, savedMeta) => {
+    const sourceUrl = savedMeta?.meta?.source || character.source || character.sourceCard;
+    if (!sourceUrl || !/^https?:\/\//i.test(String(sourceUrl))) { show("Upload a source image first"); return; }
+    if (generatingSheetId) return;
+    setGeneratingSheetId(character.id);
+    try {
+      const charZones = mergeCharacterZones(character, savedMeta);
+      const data = await fetchJson("/api/character-design/sheet", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          character_id: character.id,
+          character_name: character.name,
+          identity_contract: character.identityContract,
+          negative_prompt: character.negativePrompt,
+          source_image_url: sourceUrl,
+          source_image_urls: [sourceUrl],
+          zones: charZones.map((z) => ({ id: z.id, label: z.label, role: z.role, prompt: z.prompt || z.improvement || z.role })),
+          size: "2K",
+          tag: "design",
+        }),
+      });
+      const byId = Object.fromEntries((data.zones || []).map((z) => [z.zone_id, z]));
+      updateCharacterDesign(character.id, (current) => {
+        const nextZones = { ...(current.zones || {}) };
+        for (const z of charZones) {
+          const r = byId[z.id]; if (!r || !r.image) continue;
+          const img = r.image;
+          nextZones[z.id] = {
+            url: img.src || img.url, name: img.name || `${character.shortName} ${z.label}`,
+            imageId: img.id, updatedAt: Date.now(),
+            note: r.persisted ? "Generated grid" : "Generated grid (temporary URL)",
+            model: data.model || "ark-image", generatedPrompt: data.prompt || "", temporary: Boolean(r.temporary),
+          };
+        }
+        return { meta: current.meta || savedMeta?.meta, activeZoneId: current.activeZoneId || charZones[0]?.id, zones: nextZones };
+      });
+      show(data.partial ? `Generated ${data.zones.length}/${data.requested} views` : `Generated ${data.zones.length} views`);
+    } catch (error) {
+      show(error.message || "Grid generation failed");
+    } finally {
+      setGeneratingSheetId("");
+    }
+  };
+
   const createCharacterFromUpload = async (img) => {
     if (addingCharacter) return;
     setAddingCharacter(true);
@@ -725,7 +772,10 @@ export function CharacterDesignPage() {
       });
       setNewCharacterName("");
       navigate("/design", { character: meta.id, zone: "full_front" });
-      show(`${meta.shortName} added`);
+      show(`Generating ${meta.shortName}'s identity grid…`);
+      const builtCharacter = characterFromMeta(meta);
+      // fire and forget; runSheetGeneration manages its own flag + toasts
+      runSheetGeneration(builtCharacter, { meta, zones: {} });
     } catch (error) {
       show(error.message || "Character upload failed");
     } finally {
@@ -797,7 +847,7 @@ export function CharacterDesignPage() {
           source_image_url: selectedCharacter.sourceCard,
           reference_image_url: activeZone.referenceImage || selectedCharacter.sourceCard,
           current_image_url: activeZone.currentImage,
-          size: "1920x1920",
+          size: "2K",
           tag: "design",
         }),
       });
@@ -943,17 +993,37 @@ export function CharacterDesignPage() {
             const characterSaved = state.characterDesigns?.[character.id] || {};
             const primary = characterReferenceItems(character, characterSaved)[0];
             const count = mergeCharacterZones(character, characterSaved).filter((zone) => zone.updatedAt).length;
+            const isCustom = !builtInIds.has(character.id);
             return (
-              <button
+              <div
                 key={character.id}
+                role="button"
+                tabIndex={0}
                 className={"character-roster-card" + (character.id === selectedCharacter.id ? " active" : "")}
                 onClick={() => selectCharacter(character.id)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectCharacter(character.id); } }}
               >
                 <img src={primary?.src || character.sourceCard} alt="" />
                 <span>{character.code}</span>
                 <strong>{character.shortName}</strong>
                 <em>{count} updates</em>
-              </button>
+                {isCustom && (
+                  <button
+                    type="button"
+                    className="character-roster-del"
+                    title={`Delete ${character.shortName}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!window.confirm(`Delete ${character.shortName}? This removes the character and its zone overrides.`)) return;
+                      removeCharacterDesign(character.id);
+                      if (character.id === selectedCharacter.id) navigate("/design", {});
+                      show(`${character.shortName} deleted`);
+                    }}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>
@@ -997,8 +1067,18 @@ export function CharacterDesignPage() {
         <section className="character-zone-board">
           <div className="character-zone-toolbar">
             <SectionHeader title="Identity Graph" sub={activeZone.group} count={zones.length} />
+            {selectedCharacter.custom && (
+              <button
+                className="btn btn-primary character-zone-generate"
+                onClick={() => runSheetGeneration(selectedCharacter, saved)}
+                disabled={Boolean(generatingSheetId)}
+              >
+                {sheetGenerating ? <span className="spinner" /> : <Icon name="sparkle" size={14} />}
+                {sheetGenerating ? "Generating…" : (updatedZones ? "Regenerate grid" : "Generate grid")}
+              </button>
+            )}
           </div>
-          <div className="character-zone-grid">
+          <div className={"character-zone-grid" + (sheetGenerating ? " generating" : "")}>
             {zones.map((zone) => (
               <button
                 key={zone.id}
@@ -1007,6 +1087,7 @@ export function CharacterDesignPage() {
               >
                 <div className="character-zone-img" style={{ aspectRatio: zone.aspect }}>
                   <img src={zone.currentImage} alt={`${selectedCharacter.shortName} ${zone.label}`} />
+                  {sheetGenerating && !zone.updatedAt && <span className="character-zone-spinner spinner" />}
                 </div>
                 <div className="character-zone-meta">
                   <div>
@@ -1030,10 +1111,12 @@ export function CharacterDesignPage() {
             <p className="character-zone-role">{activeZone.role}</p>
           </div>
 
-          <div className="character-crop-readout">
-            <span>crop</span>
-            <strong>[{activeZone.crop.join(", ")}]</strong>
-          </div>
+          {activeZone.crop?.length ? (
+            <div className="character-crop-readout">
+              <span>crop</span>
+              <strong>[{activeZone.crop.join(", ")}]</strong>
+            </div>
+          ) : null}
 
           <div>
             <label className="label">Zone improvement request</label>

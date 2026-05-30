@@ -56,7 +56,7 @@ const monitorMode = process.env.TASK_MONITOR_MODE === "webhook" ? "webhook" : "p
 const callbackBaseUrl = (process.env.ARK_CALLBACK_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || process.env.ARK_CALLBACK_BASE_URL || "").replace(/\/+$/, "");
 const webhookToken = process.env.ARK_WEBHOOK_TOKEN || process.env.WEBHOOK_TOKEN || process.env.MCP_TOKEN || "";
-const webAccessToken = process.env.MCP_TOKEN || "";
+const webAccessToken = process.env.WEB_ACCESS_TOKEN || process.env.STUDIO_ACCESS_TOKEN || process.env.MCP_TOKEN || "";
 const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
 const maxAudioBytes = Number(process.env.MAX_AUDIO_BYTES || 15 * 1024 * 1024);
 const maxJsonBodyBytes = Number(process.env.MAX_JSON_BODY_BYTES || Math.ceil(Math.max(maxImageBytes, maxAudioBytes) * 1.5) + 1024 * 1024);
@@ -2452,7 +2452,15 @@ async function handleMcp(req, res, url) {
 async function routeApi(req, res, url) {
   try {
     if (url.pathname === "/api/auth/config") {
-      sendJson(res, 200, { authRequired: Boolean(webAccessToken) });
+      sendJson(res, 200, {
+        authRequired: Boolean(webAccessToken),
+        image: {
+          model: arkImageModel,
+          size: arkImageSize,
+          uploadConfigured: Boolean(imageRepoBaseUrl && imageRepoUploadKey),
+          tag: imageRepoTag,
+        },
+      });
       return true;
     }
 

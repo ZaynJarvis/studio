@@ -20,6 +20,34 @@ export function authHeader() {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+function readTokenFromLocation() {
+  if (typeof window === "undefined") return "";
+
+  const url = new URL(window.location.href);
+  const urlToken = url.searchParams.get("access_token") || url.searchParams.get("token") || "";
+  let hashToken = "";
+  let nextHash = url.hash;
+
+  if (url.hash.includes("?")) {
+    const [hashPath, hashQuery = ""] = url.hash.split("?");
+    const params = new URLSearchParams(hashQuery);
+    hashToken = params.get("access_token") || params.get("token") || "";
+    params.delete("access_token");
+    params.delete("token");
+    const query = params.toString();
+    nextHash = query ? `${hashPath}?${query}` : hashPath;
+  }
+
+  const token = (urlToken || hashToken).trim();
+  if (!token) return "";
+
+  url.searchParams.delete("access_token");
+  url.searchParams.delete("token");
+  url.hash = nextHash;
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  return token;
+}
+
 async function verifyToken(token) {
   const res = await fetch("/api/auth/verify", {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -49,7 +77,9 @@ export function AuthGate({ children }) {
           setPhase("ready");
           return;
         }
-        const existing = getToken();
+        const urlToken = readTokenFromLocation();
+        if (urlToken) setToken(urlToken);
+        const existing = urlToken || getToken();
         if (existing && (await verifyToken(existing))) {
           if (!cancelled) setPhase("ready");
           return;

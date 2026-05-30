@@ -556,9 +556,22 @@ export function CharacterDesignPage() {
   const [zoneDrafts, setZoneDrafts] = useState({});
   const [replacingZone, setReplacingZone] = useState("");
   const [generatingZone, setGeneratingZone] = useState("");
+  const [runtimeImage, setRuntimeImage] = useState(null);
   const activeInstruction = zoneDrafts[activeZone.id] ?? activeZone.improvement;
   const updatedZones = zones.filter((zone) => zone.updatedAt).length;
   const activeGenerating = generatingZone === activeZone.id;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchJson("/api/auth/config")
+      .then((config) => {
+        if (!cancelled) setRuntimeImage(config.image || null);
+      })
+      .catch(() => {
+        if (!cancelled) setRuntimeImage(null);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!activeZone?.id || saved.activeZoneId === activeZone.id) return;
@@ -739,7 +752,8 @@ export function CharacterDesignPage() {
           <div className="character-design-chips">
             <span>{zones.length} zones</span>
             <span>{updatedZones} updated</span>
-            <span>Identity locked</span>
+            <span>{runtimeImage?.size || "2K"} image endpoint</span>
+            <span>{runtimeImage?.uploadConfigured ? "Cloud upload ready" : "Cloud upload missing"}</span>
           </div>
         </div>
         <div className="character-design-sheet">

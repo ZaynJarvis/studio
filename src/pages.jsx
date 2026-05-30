@@ -740,12 +740,12 @@ export function CharacterDesignPage() {
       const remote = await uploadImageAsset({
         ...img,
         name: `${selectedCharacter.shortName}-${activeZone.id}-${img.name || "zone.png"}`,
-      });
+      }, "design");
       const item = addImage({
         ...remote,
         name: `${selectedCharacter.shortName} ${activeZone.label}`,
         provider: remote.provider || "cloud",
-        tag: remote.tag || "studio",
+        tag: remote.tag || "design",
         characterId: selectedCharacter.id,
         characterName: selectedCharacter.name,
         zoneId: activeZone.id,
@@ -797,18 +797,20 @@ export function CharacterDesignPage() {
           source_image_url: selectedCharacter.sourceCard,
           reference_image_url: activeZone.referenceImage || selectedCharacter.sourceCard,
           current_image_url: activeZone.currentImage,
+          size: "1920x1920",
+          tag: "design",
         }),
       });
       const remote = imageFromUploadResponse(data, {
         name: `${selectedCharacter.shortName} ${activeZone.label}`,
         provider: data.persisted ? "cloud" : "ark",
-        tag: "studio",
+        tag: "design",
       });
       const item = addImage({
         ...remote,
         name: `${selectedCharacter.shortName} ${activeZone.label}`,
         provider: remote.provider || (data.persisted ? "cloud" : "ark"),
-        tag: remote.tag || "studio",
+        tag: remote.tag || "design",
         characterId: selectedCharacter.id,
         characterName: selectedCharacter.name,
         zoneId: activeZone.id,

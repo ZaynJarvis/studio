@@ -825,7 +825,7 @@ function assertImageRepoConfigured() {
   }
 }
 
-async function uploadImageToRepo(imageUrl, name, label = "Image") {
+async function uploadImageToRepo(imageUrl, name, label = "Image", tagOverride) {
   if (!imageUrl || !String(imageUrl).startsWith("data:")) return null;
   const decoded = decodeDataImageUrl(imageUrl, label);
   if (!decoded) {
@@ -834,10 +834,11 @@ async function uploadImageToRepo(imageUrl, name, label = "Image") {
 
   assertImageRepoConfigured();
 
+  const uploadTag = (tagOverride || imageRepoTag);
   const filename = cleanImageUploadName(name, decoded.ext);
   const form = new FormData();
   form.append("file", new Blob([decoded.buffer], { type: decoded.mime }), filename);
-  if (imageRepoTag) form.append("tag", imageRepoTag);
+  if (uploadTag) form.append("tag", uploadTag);
 
   const response = await fetch(`${imageRepoBaseUrl}/api/upload`, {
     method: "POST",
@@ -868,7 +869,7 @@ async function uploadImageToRepo(imageUrl, name, label = "Image") {
     bytes: payload.size ?? decoded.buffer.length,
     mime: payload.contentType || decoded.mime,
     mediaType: payload.mediaType || "image",
-    tag: payload.tag || imageRepoTag || "",
+    tag: payload.tag || uploadTag || "",
     duplicate: Boolean(payload.duplicate),
     provider: "cloud",
   };
@@ -1011,6 +1012,7 @@ function characterZoneContext(input = {}, mediaBaseUrl = publicBaseUrl) {
     referenceUrls,
     size: normalizeImageSize(input.size || input.output_size || input.outputSize),
     seed: clampInt(input.seed, -1, 4_294_967_295, Math.floor(Math.random() * 99_999)),
+    tag: String(input.tag || input.cloud_tag || "design").trim(),
   };
 }
 
@@ -1207,7 +1209,7 @@ async function generateCharacterZoneImage(rawInput, mediaBaseUrl = publicBaseUrl
     }
     if (dataUrl && imageRepoUploadKey) {
       try {
-        persisted = await uploadImageToRepo(dataUrl, name, "Generated character zone");
+        persisted = await uploadImageToRepo(dataUrl, name, "Generated character zone", context.tag);
       } catch (error) {
         persistError = publicError(error);
         console.warn("character image cloud persistence failed", persistError);
@@ -1917,7 +1919,8 @@ async function handleUploadImage(req, res) {
     throw httpError(400, "image_required", "Image data URL is required.");
   }
 
-  const persisted = await uploadImageToRepo(image, input.name || input.filename || "image.jpg", "Image");
+  const tag = String(input.tag || input.cloud_tag || "").trim();
+  const persisted = await uploadImageToRepo(image, input.name || input.filename || "image.jpg", "Image", tag || undefined);
   if (!persisted) {
     throw httpError(400, "image_invalid", "Image must be a JPEG, PNG, or WEBP data URL.");
   }
@@ -2303,6 +2306,59 @@ function mcpTools() {
         additionalProperties: false,
       },
     },
+    {
+      name: "design_iterate",
+      description: "Iterate a single character-design zone/aspect with ARK seedream and persist the result to Cloud (default tag=design). Mirrors the Studio character-design zone endpoint so a bot can drive per-aspect refinement. Pass source_image_url for the current image to refine and reference_image_urls for identity references.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          character_name: { type: "string", description: "Character display name." },
+          character_code: { type: "string", description: "Character code identifier." },
+          zone_id: { type: "string", description: "The zone/aspect id being iterated." },
+          zone_label: { type: "string", description: "Human-readable label for the zone." },
+          zone_role: { type: "string", description: "Role/purpose of the zone." },
+          instruction: { type: "string", description: "Instruction describing the requested change for this zone." },
+          identity_contract: { type: "array", items: { type: "string" }, description: "Identity contract constraints to preserve." },
+          negative_prompt: { type: "string", description: "Negative prompt describing what to avoid." },
+          aspect: { type: "string", description: "Optional aspect ratio intent, e.g. 1:1." },
+          size: { type: "string", description: "Optional explicit output size, e.g. 1920x1920." },
+          seed: { type: "integer", description: "Optional seed for reproducibility." },
+          source_image_url: { type: "string", description: "Optional current/source image URL to refine." },
+          reference_image_urls: { type: "array", items: { type: "string" }, description: "Optional reference image URLs for identity." },
+          tag: { type: "string", description: "Cloud tag for the saved image (default design).", default: "design" },
+        },
+        required: ["zone_id", "instruction"],
+        additionalProperties: true,
+      },
+    },
+    {
+      name: "design_upload",
+      description: "Precisely upload a single design image (JPEG/PNG/WEBP data URL) to Cloud tagged for design (default tag=design). Returns the public image URL.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          image: { type: "string", description: "JPEG/PNG/WEBP data URL to upload." },
+          data_url: { type: "string", description: "Alias for image." },
+          name: { type: "string", description: "Optional filename for the uploaded image." },
+          tag: { type: "string", description: "Cloud tag for the saved image (default design).", default: "design" },
+        },
+        required: ["image"],
+        additionalProperties: true,
+      },
+    },
+    {
+      name: "design_list",
+      description: "Get or list design images from Cloud by tag (default tag=design). Returns image entries with public URLs and a pagination cursor.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tag: { type: "string", description: "Cloud tag to list (default design).", default: "design" },
+          limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+          cursor: { type: "string", description: "Pagination cursor." },
+        },
+        additionalProperties: false,
+      },
+    },
   ];
 }
 
@@ -2352,6 +2408,28 @@ async function callMcpTool(name, args = {}) {
       .slice(0, limit)
       .map(publicTask);
     return mcpTextResult({ tasks: items });
+  }
+
+  if (name === "design_iterate") {
+    const result = await generateCharacterZoneImage({ ...args, tag: args.tag || "design" }, publicBaseUrl);
+    return mcpTextResult(result);
+  }
+
+  if (name === "design_upload") {
+    const image = args.image || args.data_url;
+    if (!image) {
+      throw httpError(400, "image_required", "Image data URL is required.");
+    }
+    const uploaded = await uploadImageToRepo(image, args.name || "design.jpg", "Design image", args.tag || "design");
+    if (!uploaded) {
+      throw httpError(400, "image_invalid", "Image must be a JPEG, PNG, or WEBP data URL.");
+    }
+    return mcpTextResult({ image: uploadedImagePayload(uploaded, args.name) });
+  }
+
+  if (name === "design_list") {
+    const out = await listImagesFromRepo({ limit: clampInt(args.limit, 1, 200, 50), cursor: args.cursor || "", tag: args.tag || "design" });
+    return mcpTextResult(out);
   }
 
   throw httpError(404, "tool_not_found", `Unknown MCP tool: ${name}`);

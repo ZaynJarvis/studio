@@ -170,3 +170,6 @@ export const CHARACTER_DESIGN = {
     "Generate a clean photorealistic 10-panel multi-view contact sheet of the same tiny white toy-breed puppy from the reference. Preserve lap-sized body, close-set glossy dark eyes, tiny black button nose, compact muzzle, cream-white fluffy coat, soft floppy ears, slightly uneven puppy grooming, small paws, calm curious expression, red/pink harness or chest strap in body views, and the blue plush toy prop. Plain light gray studio background. No text, labels, logos, or watermark.",
   zones: CHARACTER_ZONE_DEFS,
 };
+
+export const CHARACTER_DESIGNS = [CHARACTER_DESIGN];
+export const DEFAULT_CHARACTER_DESIGN = CHARACTER_DESIGN;

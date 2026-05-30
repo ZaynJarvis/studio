@@ -621,6 +621,12 @@ function publicMediaUrl(path, baseUrl = publicBaseUrl) {
   return new URL(path, baseUrl).toString();
 }
 
+function absolutePublicUrl(value, baseUrl = publicBaseUrl) {
+  const raw = String(value || "").trim();
+  if (!raw || raw.startsWith("data:") || /^https?:\/\//i.test(raw)) return raw || null;
+  return publicMediaUrl(raw, baseUrl);
+}
+
 function requestPublicBaseUrl(req) {
   const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
   const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim();
@@ -1526,7 +1532,7 @@ async function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
   assertVideoPromptDoesNotUseReferenceAsFirstFrame(prompt);
 
   let rawImageUrl = input.image_url || input.imageUrl || input.image?.src || null;
-  const rawLastFrameImageUrl = input.last_frame_image_url
+  let rawLastFrameImageUrl = input.last_frame_image_url
     || input.lastFrameImageUrl
     || input.last_image_url
     || input.lastImageUrl
@@ -1558,6 +1564,9 @@ async function normalizeGenerateInput(input, mediaBaseUrl = publicBaseUrl) {
     rawReferenceImageUrls = normalizeUrlList([...rawReferenceImageUrls, rawImageUrl]);
     rawImageUrl = null;
   }
+  rawImageUrl = absolutePublicUrl(rawImageUrl, mediaBaseUrl);
+  rawLastFrameImageUrl = absolutePublicUrl(rawLastFrameImageUrl, mediaBaseUrl);
+  rawReferenceImageUrls = rawReferenceImageUrls.map((url) => absolutePublicUrl(url, mediaBaseUrl)).filter(Boolean);
   if (rawLastFrameImageUrl && !rawImageUrl) {
     throw httpError(400, "last_frame_requires_first_frame", "last_frame_image_url requires image_url as the first frame.");
   }

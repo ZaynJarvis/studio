@@ -3,7 +3,7 @@ import { Icon, DropZone, VideoPlayer, GenerationProgress, useToast } from './com
 import { useStore, useHashRoute, relTime, fmtDate } from './store';
 import { authHeader, clearToken, getToken } from './auth';
 import { prepareUploadImage } from './imageUpload';
-import { CHARACTER_DESIGN } from './characterDesignData';
+import { CHARACTER_DESIGNS, DEFAULT_CHARACTER_DESIGN } from './characterDesignData';
 
 const HOST_PARAMS = {
   resolutions: ["720p", "1080p"],
@@ -472,21 +472,107 @@ function SectionHeader({ title, sub, count }) {
   );
 }
 
-function characterDesignDeepLink(zoneId) {
+function characterDesignDeepLink(characterId, zoneId) {
   if (typeof window === "undefined") return "";
   const url = new URL(window.location.href);
-  url.hash = `/design?zone=${encodeURIComponent(zoneId)}`;
+  url.hash = `/design?character=${encodeURIComponent(characterId)}&zone=${encodeURIComponent(zoneId)}`;
   return url.toString();
 }
 
-function mergeCharacterZones(saved = {}) {
+function safeCharacterId(name) {
+  return `character_${String(name || "character")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 42) || "custom"}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function makeUploadedCharacterMeta(name, sourceImage) {
+  const cleanName = String(name || "").trim() || "New Character";
+  const shortName = cleanName.split(/\s+/).slice(0, 2).join(" ");
+  return {
+    id: safeCharacterId(cleanName),
+    code: `ID-C${Math.floor(100 + Math.random() * 900)}`,
+    name: cleanName,
+    shortName,
+    tagline: "Uploaded reference character with reusable identity zones.",
+    source: sourceImage.src,
+    sourceCard: sourceImage.src,
+    generatedSheet: sourceImage.src,
+    sourcePackagePath: "custom/uploaded-character",
+    spec: [
+      ["Source", sourceImage.name || "Uploaded image"],
+      ["Identity", cleanName],
+      ["Build", "User supplied reference"],
+      ["Face", "Preserve source facial identity"],
+      ["Wardrobe", "Preserve source wardrobe and props"],
+      ["Lighting", "Use source image as identity anchor"],
+      ["Background", "Can vary by generation prompt"],
+    ],
+    identityContract: [
+      `Preserve ${cleanName} as a distinct character across all generated shots.`,
+      "Keep face, body scale, outfit, color palette, and recognizable props consistent with the uploaded reference.",
+      "Do not merge this character with other characters or drift into a different identity.",
+    ],
+    negativePrompt: "No text, labels, logos, watermark, merged identity, different character, distorted face, malformed hands or paws, or cartoon style unless requested.",
+    sheetPrompt: `Generate a clean multi-view identity sheet for ${cleanName} from the uploaded reference. Preserve the same identity across face, full-body, outfit, and prop zones.`,
+    sourceImageId: sourceImage.id || null,
+    sourceImageName: sourceImage.name || "uploaded reference",
+    custom: true,
+  };
+}
+
+function characterFromMeta(meta = {}) {
+  const base = DEFAULT_CHARACTER_DESIGN;
+  const sourceCard = meta.sourceCard || meta.source || base.sourceCard;
+  const generatedSheet = meta.generatedSheet || sourceCard;
+  const shortName = meta.shortName || meta.name || "Character";
+
+  return {
+    ...base,
+    ...meta,
+    id: meta.id || base.id,
+    code: meta.code || "ID-CUSTOM",
+    name: meta.name || "Custom Character",
+    shortName,
+    source: meta.source || sourceCard,
+    sourceCard,
+    generatedSheet,
+    spec: Array.isArray(meta.spec) && meta.spec.length ? meta.spec : base.spec,
+    identityContract: Array.isArray(meta.identityContract) && meta.identityContract.length ? meta.identityContract : base.identityContract,
+    negativePrompt: meta.negativePrompt || base.negativePrompt,
+    zones: base.zones.map((zone) => ({
+      ...zone,
+      image: sourceCard,
+      sheetImage: sourceCard,
+      referenceImage: sourceCard,
+      improvement: `Improve ${shortName}'s ${zone.label.toLowerCase()} identity zone from the uploaded reference while preserving this character as distinct from all other characters.`,
+    })),
+  };
+}
+
+function listWorkspaceCharacters(characterDesigns = {}) {
+  const builtIns = new Map(CHARACTER_DESIGNS.map((character) => [character.id, character]));
+  const custom = Object.entries(characterDesigns || {})
+    .filter(([, saved]) => saved?.meta && !builtIns.has(saved.meta.id))
+    .map(([, saved]) => characterFromMeta(saved.meta));
+  return [...CHARACTER_DESIGNS, ...custom];
+}
+
+function resolveWorkspaceCharacter(characterDesigns = {}, characterId) {
+  const characters = listWorkspaceCharacters(characterDesigns);
+  return characters.find((character) => character.id === characterId) || characters[0] || DEFAULT_CHARACTER_DESIGN;
+}
+
+function mergeCharacterZones(character, saved = {}) {
   const savedZones = saved.zones || {};
-  return CHARACTER_DESIGN.zones.map((zone) => {
+  return character.zones.map((zone) => {
     const override = savedZones[zone.id] || {};
     return {
       ...zone,
       currentImage: override.url || zone.image,
-      currentName: override.name || `${CHARACTER_DESIGN.shortName} ${zone.label}`,
+      currentName: override.name || `${character.shortName} ${zone.label}`,
       imageId: override.imageId || null,
       updatedAt: override.updatedAt || null,
       note: override.note || "Prototype crop",
@@ -499,24 +585,44 @@ function mergeCharacterZones(saved = {}) {
   });
 }
 
-function buildZoneContext(zone, instruction) {
+function characterReferenceItems(character, saved = {}) {
+  const zones = mergeCharacterZones(character, saved);
+  const preferred = ["full_front", "half_body", "face_front"]
+    .map((id) => zones.find((zone) => zone.id === id))
+    .filter(Boolean);
+  const selected = preferred.length ? preferred : zones.slice(0, 2);
+  return selected.map((zone) => ({
+    id: `design_${character.id}_${zone.id}`,
+    name: `${character.shortName} ${zone.label}`,
+    src: zone.currentImage,
+    url: zone.currentImage,
+    mediaPath: zone.currentImage,
+    provider: zone.updatedAt ? "cloud" : "studio-design",
+    tag: "studio",
+    characterId: character.id,
+    characterName: character.name,
+    zoneId: zone.id,
+  }));
+}
+
+function buildZoneContext(character, zone, instruction) {
   return [
-    `Character: ${CHARACTER_DESIGN.name} (${CHARACTER_DESIGN.code})`,
+    `Character: ${character.name} (${character.code})`,
     `Zone: ${zone.id} / ${zone.label}`,
     `Role: ${zone.role}`,
     `Current image: ${zone.currentImage}`,
     `Crop box: [${zone.crop.join(", ")}] on the 1531x1018 generated sheet`,
     `Requested improvement: ${instruction}`,
-    `Identity contract: ${CHARACTER_DESIGN.identityContract.join(" ")}`,
-    `Negative prompt: ${CHARACTER_DESIGN.negativePrompt}`,
+    `Identity contract: ${character.identityContract.join(" ")}`,
+    `Negative prompt: ${character.negativePrompt}`,
   ].join("\n");
 }
 
-function buildZoneBotMessage(zone, instruction) {
+function buildZoneBotMessage(character, zone, instruction) {
   return [
     "@stark please improve this Studio character-design zone only.",
     "",
-    `Character: ${CHARACTER_DESIGN.name} (${CHARACTER_DESIGN.code})`,
+    `Character: ${character.name} (${character.code})`,
     `Zone: ${zone.id} / ${zone.label}`,
     `Role: ${zone.role}`,
     `Current image URL: ${zone.currentImage}`,
@@ -525,10 +631,10 @@ function buildZoneBotMessage(zone, instruction) {
     "Change request:",
     instruction,
     "",
-    "Keep the other zones unchanged. Preserve the same dog identity across the dossier. If you generate or edit an image, replace only this zone image in Studio and report the new image URL/path.",
+    "Keep the other zones unchanged. Preserve this character as a distinct identity in the dossier. If you generate or edit an image, replace only this zone image in Studio and report the new image URL/path.",
     "",
-    `Identity contract: ${CHARACTER_DESIGN.identityContract.join(" ")}`,
-    `Negative prompt: ${CHARACTER_DESIGN.negativePrompt}`,
+    `Identity contract: ${character.identityContract.join(" ")}`,
+    `Negative prompt: ${character.negativePrompt}`,
   ].join("\n");
 }
 
@@ -549,17 +655,25 @@ export function CharacterDesignPage() {
   const { state, addImage, updateCharacterDesign } = useStore();
   const { query, navigate } = useHashRoute();
   const { show, node } = useToast();
-  const saved = useMemo(() => state.characterDesigns?.[CHARACTER_DESIGN.id] || {}, [state.characterDesigns]);
-  const zones = useMemo(() => mergeCharacterZones(saved), [saved]);
+  const characters = useMemo(() => listWorkspaceCharacters(state.characterDesigns), [state.characterDesigns]);
+  const selectedCharacter = useMemo(
+    () => resolveWorkspaceCharacter(state.characterDesigns, query.character),
+    [query.character, state.characterDesigns]
+  );
+  const saved = useMemo(() => state.characterDesigns?.[selectedCharacter.id] || {}, [selectedCharacter.id, state.characterDesigns]);
+  const zones = useMemo(() => mergeCharacterZones(selectedCharacter, saved), [selectedCharacter, saved]);
   const selectedZoneId = query.zone || saved.activeZoneId || zones[0]?.id;
   const activeZone = zones.find((zone) => zone.id === selectedZoneId) || zones[0];
   const [zoneDrafts, setZoneDrafts] = useState({});
   const [replacingZone, setReplacingZone] = useState("");
   const [generatingZone, setGeneratingZone] = useState("");
+  const [addingCharacter, setAddingCharacter] = useState(false);
+  const [newCharacterName, setNewCharacterName] = useState("");
   const [runtimeImage, setRuntimeImage] = useState(null);
-  const activeInstruction = zoneDrafts[activeZone.id] ?? activeZone.improvement;
+  const activeInstruction = zoneDrafts[`${selectedCharacter.id}:${activeZone.id}`] ?? activeZone.improvement;
   const updatedZones = zones.filter((zone) => zone.updatedAt).length;
-  const activeGenerating = generatingZone === activeZone.id;
+  const activeKey = `${selectedCharacter.id}:${activeZone.id}`;
+  const activeGenerating = generatingZone === activeKey;
 
   useEffect(() => {
     let cancelled = false;
@@ -575,29 +689,69 @@ export function CharacterDesignPage() {
 
   useEffect(() => {
     if (!activeZone?.id || saved.activeZoneId === activeZone.id) return;
-    updateCharacterDesign(CHARACTER_DESIGN.id, { activeZoneId: activeZone.id });
-  }, [activeZone?.id, saved.activeZoneId, updateCharacterDesign]);
+    updateCharacterDesign(selectedCharacter.id, { activeZoneId: activeZone.id, meta: saved.meta });
+  }, [activeZone?.id, saved.activeZoneId, saved.meta, selectedCharacter.id, updateCharacterDesign]);
+
+  const selectCharacter = (characterId) => {
+    const character = resolveWorkspaceCharacter(state.characterDesigns, characterId);
+    const characterSaved = state.characterDesigns?.[character.id] || {};
+    navigate("/design", { character: character.id, zone: characterSaved.activeZoneId || character.zones[0]?.id });
+  };
 
   const selectZone = (zoneId) => {
-    updateCharacterDesign(CHARACTER_DESIGN.id, { activeZoneId: zoneId });
-    navigate("/design", { zone: zoneId });
+    updateCharacterDesign(selectedCharacter.id, { activeZoneId: zoneId, meta: saved.meta });
+    navigate("/design", { character: selectedCharacter.id, zone: zoneId });
+  };
+
+  const createCharacterFromUpload = async (img) => {
+    if (addingCharacter) return;
+    setAddingCharacter(true);
+    try {
+      const remote = await uploadImageAsset({
+        ...img,
+        name: `${newCharacterName || "character"}-${img.name || "reference.png"}`,
+      });
+      const source = addImage({
+        ...remote,
+        name: newCharacterName || img.name || "Character reference",
+        provider: remote.provider || "cloud",
+        tag: remote.tag || "studio",
+      });
+      const meta = makeUploadedCharacterMeta(newCharacterName || source.name || "New Character", source);
+      updateCharacterDesign(meta.id, {
+        meta,
+        activeZoneId: "full_front",
+        zones: {},
+      });
+      setNewCharacterName("");
+      navigate("/design", { character: meta.id, zone: "full_front" });
+      show(`${meta.shortName} added`);
+    } catch (error) {
+      show(error.message || "Character upload failed");
+    } finally {
+      setAddingCharacter(false);
+    }
   };
 
   const replaceZoneImage = async (img) => {
     if (!activeZone || replacingZone) return;
-    setReplacingZone(activeZone.id);
+    setReplacingZone(activeKey);
     try {
       const remote = await uploadImageAsset({
         ...img,
-        name: `${CHARACTER_DESIGN.shortName}-${activeZone.id}-${img.name || "zone.png"}`,
+        name: `${selectedCharacter.shortName}-${activeZone.id}-${img.name || "zone.png"}`,
       });
       const item = addImage({
         ...remote,
-        name: `${CHARACTER_DESIGN.shortName} ${activeZone.label}`,
+        name: `${selectedCharacter.shortName} ${activeZone.label}`,
         provider: remote.provider || "cloud",
         tag: remote.tag || "studio",
+        characterId: selectedCharacter.id,
+        characterName: selectedCharacter.name,
+        zoneId: activeZone.id,
       });
-      updateCharacterDesign(CHARACTER_DESIGN.id, (current) => ({
+      updateCharacterDesign(selectedCharacter.id, (current) => ({
+        meta: current.meta || saved.meta,
         activeZoneId: activeZone.id,
         zones: {
           ...(current.zones || {}),
@@ -621,15 +775,15 @@ export function CharacterDesignPage() {
 
   const improveZoneWithModel = async () => {
     if (!activeZone || generatingZone) return;
-    setGeneratingZone(activeZone.id);
+    setGeneratingZone(activeKey);
     try {
       const data = await fetchJson("/api/character-design/zone", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          character_id: CHARACTER_DESIGN.id,
-          character_name: CHARACTER_DESIGN.name,
-          character_code: CHARACTER_DESIGN.code,
+          character_id: selectedCharacter.id,
+          character_name: selectedCharacter.name,
+          character_code: selectedCharacter.code,
           zone: {
             id: activeZone.id,
             label: activeZone.label,
@@ -638,25 +792,29 @@ export function CharacterDesignPage() {
             aspect: activeZone.aspect,
           },
           instruction: activeInstruction,
-          identity_contract: CHARACTER_DESIGN.identityContract,
-          negative_prompt: CHARACTER_DESIGN.negativePrompt,
-          source_image_url: CHARACTER_DESIGN.sourceCard,
-          reference_image_url: activeZone.referenceImage || CHARACTER_DESIGN.sourceCard,
+          identity_contract: selectedCharacter.identityContract,
+          negative_prompt: selectedCharacter.negativePrompt,
+          source_image_url: selectedCharacter.sourceCard,
+          reference_image_url: activeZone.referenceImage || selectedCharacter.sourceCard,
           current_image_url: activeZone.currentImage,
         }),
       });
       const remote = imageFromUploadResponse(data, {
-        name: `${CHARACTER_DESIGN.shortName} ${activeZone.label}`,
+        name: `${selectedCharacter.shortName} ${activeZone.label}`,
         provider: data.persisted ? "cloud" : "ark",
         tag: "studio",
       });
       const item = addImage({
         ...remote,
-        name: `${CHARACTER_DESIGN.shortName} ${activeZone.label}`,
+        name: `${selectedCharacter.shortName} ${activeZone.label}`,
         provider: remote.provider || (data.persisted ? "cloud" : "ark"),
         tag: remote.tag || "studio",
+        characterId: selectedCharacter.id,
+        characterName: selectedCharacter.name,
+        zoneId: activeZone.id,
       });
-      updateCharacterDesign(CHARACTER_DESIGN.id, (current) => ({
+      updateCharacterDesign(selectedCharacter.id, (current) => ({
+        meta: current.meta || saved.meta,
         activeZoneId: activeZone.id,
         zones: {
           ...(current.zones || {}),
@@ -683,30 +841,41 @@ export function CharacterDesignPage() {
   };
 
   const resetActiveZone = () => {
-    updateCharacterDesign(CHARACTER_DESIGN.id, (current) => {
+    updateCharacterDesign(selectedCharacter.id, (current) => {
       const nextZones = { ...(current.zones || {}) };
       delete nextZones[activeZone.id];
-      return { activeZoneId: activeZone.id, zones: nextZones };
+      return { meta: current.meta || saved.meta, activeZoneId: activeZone.id, zones: nextZones };
     });
     show(`${activeZone.label} reset`);
   };
 
   const addZoneToLibrary = () => {
     const item = addImage({
-      name: `${CHARACTER_DESIGN.shortName} ${activeZone.label}`,
+      name: `${selectedCharacter.shortName} ${activeZone.label}`,
       src: activeZone.currentImage,
       url: activeZone.currentImage,
       mediaPath: activeZone.currentImage,
       provider: activeZone.updatedAt ? "cloud" : "studio-design",
       tag: "studio",
+      characterId: selectedCharacter.id,
+      characterName: selectedCharacter.name,
+      zoneId: activeZone.id,
     });
     navigate("/create", { fromImage: item.id });
   };
 
+  const addCharacterToCreate = () => {
+    const refs = characterReferenceItems(selectedCharacter, saved);
+    const items = refs.map((ref) => addImage(ref));
+    navigate("/create", { fromImages: items.map((item) => item.id).join(",") });
+    show(`${selectedCharacter.shortName} references added`);
+  };
+
   const askBot = () => {
-    const message = buildZoneBotMessage(activeZone, activeInstruction);
-    const referencedText = buildZoneContext(activeZone, activeInstruction);
-    updateCharacterDesign(CHARACTER_DESIGN.id, (current) => ({
+    const message = buildZoneBotMessage(selectedCharacter, activeZone, activeInstruction);
+    const referencedText = buildZoneContext(selectedCharacter, activeZone, activeInstruction);
+    updateCharacterDesign(selectedCharacter.id, (current) => ({
+      meta: current.meta || saved.meta,
       activeZoneId: activeZone.id,
       zones: {
         ...(current.zones || {}),
@@ -721,7 +890,7 @@ export function CharacterDesignPage() {
       detail: {
         message,
         referencedText,
-        sourceUrl: characterDesignDeepLink(activeZone.id),
+        sourceUrl: characterDesignDeepLink(selectedCharacter.id, activeZone.id),
         autoSend: true,
       },
     }));
@@ -729,7 +898,7 @@ export function CharacterDesignPage() {
   };
 
   const copyPrompt = async () => {
-    const message = buildZoneBotMessage(activeZone, activeInstruction);
+    const message = buildZoneBotMessage(selectedCharacter, activeZone, activeInstruction);
     try {
       await navigator.clipboard.writeText(message);
       show("Bot prompt copied");
@@ -743,13 +912,14 @@ export function CharacterDesignPage() {
       {node}
       <header className="character-design-hero">
         <div className="character-design-title">
-          <div className="mono muted">{CHARACTER_DESIGN.sourcePackagePath}</div>
+          <div className="mono muted">{selectedCharacter.sourcePackagePath}</div>
           <h1 className="display">Character Design</h1>
           <div className="character-design-name">
-            <span>{CHARACTER_DESIGN.code}</span>
-            <strong>{CHARACTER_DESIGN.name}</strong>
+            <span>{selectedCharacter.code}</span>
+            <strong>{selectedCharacter.name}</strong>
           </div>
           <div className="character-design-chips">
+            <span>{characters.length} characters</span>
             <span>{zones.length} zones</span>
             <span>{updatedZones} updated</span>
             <span>{runtimeImage?.size || "2K"} image endpoint</span>
@@ -757,29 +927,69 @@ export function CharacterDesignPage() {
           </div>
         </div>
         <div className="character-design-sheet">
-          <img src={CHARACTER_DESIGN.generatedSheet} alt={`${CHARACTER_DESIGN.shortName} generated identity sheet`} />
+          <img src={selectedCharacter.generatedSheet} alt={`${selectedCharacter.shortName} generated identity sheet`} />
           <div className="character-design-sheet-meta">
-            <span>1531x1018</span>
-            <strong>VLM crop sheet</strong>
+            <span>{selectedCharacter.custom ? "source" : "1531x1018"}</span>
+            <strong>{selectedCharacter.custom ? "Uploaded reference" : "VLM crop sheet"}</strong>
           </div>
         </div>
       </header>
 
+      <section className="character-roster surface">
+        <div className="character-roster-list">
+          {characters.map((character) => {
+            const characterSaved = state.characterDesigns?.[character.id] || {};
+            const primary = characterReferenceItems(character, characterSaved)[0];
+            const count = mergeCharacterZones(character, characterSaved).filter((zone) => zone.updatedAt).length;
+            return (
+              <button
+                key={character.id}
+                className={"character-roster-card" + (character.id === selectedCharacter.id ? " active" : "")}
+                onClick={() => selectCharacter(character.id)}
+              >
+                <img src={primary?.src || character.sourceCard} alt="" />
+                <span>{character.code}</span>
+                <strong>{character.shortName}</strong>
+                <em>{count} updates</em>
+              </button>
+            );
+          })}
+        </div>
+        <div className="character-add">
+          <input
+            className="input"
+            value={newCharacterName}
+            onChange={(event) => setNewCharacterName(event.target.value)}
+            placeholder="new character name"
+          />
+          <DropZone
+            compact
+            image={null}
+            onFile={createCharacterFromUpload}
+            allowDrag
+            hint={addingCharacter ? "Adding character" : "Drop source image"}
+          />
+        </div>
+      </section>
+
       <div className="character-design-layout">
         <aside className="character-dossier surface">
           <div className="character-source">
-            <img src={CHARACTER_DESIGN.sourceCard} alt={`${CHARACTER_DESIGN.shortName} source`} />
+            <img src={selectedCharacter.sourceCard} alt={`${selectedCharacter.shortName} source`} />
           </div>
           <div>
             <div className="label">Identity dossier</div>
-            <CharacterSpecRows rows={CHARACTER_DESIGN.spec} />
+            <CharacterSpecRows rows={selectedCharacter.spec} />
           </div>
           <div>
             <div className="label">Continuity lock</div>
             <div className="character-contract">
-              {CHARACTER_DESIGN.identityContract.map((line) => <p key={line}>{line}</p>)}
+              {selectedCharacter.identityContract.map((line) => <p key={line}>{line}</p>)}
             </div>
           </div>
+          <button className="btn" onClick={addCharacterToCreate}>
+            <Icon name="sparkle" size={14} /> Use character refs
+          </button>
         </aside>
 
         <section className="character-zone-board">
@@ -794,7 +1004,7 @@ export function CharacterDesignPage() {
                 onClick={() => selectZone(zone.id)}
               >
                 <div className="character-zone-img" style={{ aspectRatio: zone.aspect }}>
-                  <img src={zone.currentImage} alt={`${CHARACTER_DESIGN.shortName} ${zone.label}`} />
+                  <img src={zone.currentImage} alt={`${selectedCharacter.shortName} ${zone.label}`} />
                 </div>
                 <div className="character-zone-meta">
                   <div>
@@ -828,7 +1038,7 @@ export function CharacterDesignPage() {
             <textarea
               className="textarea character-bot-textarea"
               value={activeInstruction}
-              onChange={(e) => setZoneDrafts((drafts) => ({ ...drafts, [activeZone.id]: e.target.value }))}
+              onChange={(e) => setZoneDrafts((drafts) => ({ ...drafts, [activeKey]: e.target.value }))}
             />
           </div>
 
@@ -857,13 +1067,13 @@ export function CharacterDesignPage() {
           </div>
 
           <div>
-            <label className="label">{replacingZone === activeZone.id ? "Uploading" : "Replace image"}</label>
+            <label className="label">{replacingZone === activeKey ? "Uploading" : "Replace image"}</label>
             <DropZone
               compact
               image={null}
               onFile={replaceZoneImage}
               allowDrag
-              hint={replacingZone === activeZone.id ? "Uploading zone" : `Drop ${activeZone.label}`}
+              hint={replacingZone === activeKey ? "Uploading zone" : `Drop ${activeZone.label}`}
             />
           </div>
 
@@ -1084,6 +1294,12 @@ export function CreatePage() {
 
   const tmpl = useMemo(() => state.videos.find((v) => v.id === query.from), [query.from, state.videos]);
   const imageFromRoute = useMemo(() => state.images.find((img) => img.id === query.fromImage), [query.fromImage, state.images]);
+  const imagesFromRoute = useMemo(() => (
+    String(query.fromImages || "")
+      .split(",")
+      .map((id) => state.images.find((img) => img.id === id))
+      .filter(Boolean)
+  ), [query.fromImages, state.images]);
   const imageFromUrl = useCallback((src, name = "template image") => {
     if (!src) return null;
     const found = state.images.find((img) => [img.src, img.url, img.mediaPath, img.media_path].filter(Boolean).includes(src));
@@ -1105,6 +1321,7 @@ export function CreatePage() {
     tmpl?.mode === "i2v" ? imageFromUrl(tmpl.lastFrameUrl, "template last frame") : null
   ), [imageFromUrl, tmpl]);
   const templateReferenceImages = useMemo(() => {
+    if (imagesFromRoute.length) return imagesFromRoute;
     if (imageFromRoute) return [imageFromRoute];
     if (tmpl?.mode !== "ref2v") return [];
     return Array.from(new Set([
@@ -1113,8 +1330,9 @@ export function CreatePage() {
     ].filter(Boolean)))
       .map((src, index) => imageFromUrl(src, `template reference ${index + 1}`))
       .filter(Boolean);
-  }, [imageFromRoute, imageFromUrl, tmpl]);
+  }, [imageFromRoute, imageFromUrl, imagesFromRoute, tmpl]);
   const model = "seedance-pro";
+  const designCharacters = useMemo(() => listWorkspaceCharacters(state.characterDesigns), [state.characterDesigns]);
 
   const [prompt, setPrompt] = useState(tmpl ? tmpl.prompt : "");
   const [resolution, setResolution] = useState(tmpl ? tmpl.resolution : "1080p");
@@ -1183,6 +1401,47 @@ export function CreatePage() {
       const item = await toStoredImage(img);
       setReferenceImages((items) => items.some((x) => x.id === item.id || x.src === item.src) ? items : [...items, item].slice(0, 6));
     });
+  };
+
+  const addReferenceItems = useCallback((refs) => {
+    const incoming = (Array.isArray(refs) ? refs : []).filter((ref) => ref?.src || ref?.url);
+    if (!incoming.length) return 0;
+    const currentKeys = new Set(referenceImages.map((img) => img.id || img.src || img.url).filter(Boolean));
+    const additions = [];
+    for (const ref of incoming) {
+      const key = ref.id || ref.src || ref.url;
+      if (!key || currentKeys.has(key)) continue;
+      currentKeys.add(key);
+      additions.push({
+        ...ref,
+        src: ref.src || ref.url,
+        url: ref.url || ref.src,
+        mediaPath: ref.mediaPath || ref.media_path || ref.url || ref.src,
+        addedAt: ref.addedAt || Date.now(),
+      });
+      if (referenceImages.length + additions.length >= 6) break;
+    }
+    if (!additions.length) return 0;
+    setReferenceImages((items) => {
+      const next = [...items];
+      const seen = new Set(items.map((img) => img.id || img.src || img.url).filter(Boolean));
+      for (const ref of additions) {
+        const key = ref.id || ref.src || ref.url;
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        next.push(ref);
+        if (next.length >= 6) break;
+      }
+      return next;
+    });
+    return additions.length;
+  }, [referenceImages]);
+
+  const addDesignCharacterReferences = (character) => {
+    const saved = state.characterDesigns?.[character.id] || {};
+    const refs = characterReferenceItems(character, saved);
+    const added = addReferenceItems(refs);
+    show(added ? `${character.shortName} references added` : `${character.shortName} already selected`);
   };
 
   const libraryStrip = (onSelect, selected = []) => {
@@ -1338,6 +1597,30 @@ export function CreatePage() {
                   Reference images · <em style={{ color: "var(--fg-3)", fontStyle: "normal" }}>identity and story references</em>
                 </label>
                 <DropZone compact onFile={onPickReference} image={null} allowDrag={!phoneView} hint={phoneView ? "Tap to choose reference" : "Drop or choose reference"} />
+                {designCharacters.length > 0 && (
+                  <div className="design-reference-picker">
+                    <div className="mono muted-2">Design characters</div>
+                    <div className="design-reference-list">
+                      {designCharacters.map((character) => {
+                        const characterSaved = state.characterDesigns?.[character.id] || {};
+                        const refs = characterReferenceItems(character, characterSaved);
+                        const selectedCount = refs.filter((ref) => referenceImages.some((img) => (img.id || img.src) === (ref.id || ref.src))).length;
+                        return (
+                          <button
+                            key={character.id}
+                            className={"design-reference-card" + (selectedCount ? " selected" : "")}
+                            type="button"
+                            onClick={() => addDesignCharacterReferences(character)}
+                          >
+                            <img src={refs[0]?.src || character.sourceCard} alt="" />
+                            <strong>{character.shortName}</strong>
+                            <span>{refs.length} refs{selectedCount ? ` · ${selectedCount} selected` : ""}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 {referenceImages.length > 0 && (
                   <div className="selected-image-grid">
                     {referenceImages.map((img) => (

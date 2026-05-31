@@ -45,6 +45,9 @@ const arkImageSize = process.env.ARK_IMAGE_SIZE || "2K";
 const arkImageTimeoutMs = Number(process.env.ARK_IMAGE_TIMEOUT_MS || 120_000);
 const arkImageGridTimeoutMs = Number(process.env.ARK_IMAGE_GRID_TIMEOUT_MS || 300_000);
 const arkImageGridMaxImages = clampInt(process.env.ARK_IMAGE_GRID_MAX_IMAGES, 1, 15, 12);
+const arkSheetSize = process.env.ARK_IMAGE_SHEET_SIZE || "2048x2048";
+const designClaimTtlMs = Number(process.env.DESIGN_CLAIM_TTL_MS || 30 * 60 * 1000);
+const designInboxTtlMs = Number(process.env.DESIGN_INBOX_TTL_MS || 60 * 60 * 1000);
 const arkImagePromptModels = uniqueTitleModels([
   process.env.ARK_IMAGE_PROMPT_MODEL,
   process.env.ARK_VLM_TITLE_MODEL,
@@ -1025,15 +1028,16 @@ function buildCharacterZonePrompt(context, referencePrompt = "") {
   const cropText = context.crop.length ? `Crop coordinates from the source sheet: [${context.crop.join(", ")}].` : "";
 
   return [
-    "Generate exactly one photorealistic Studio character identity-dossier image.",
+    "Generate exactly ONE photorealistic Studio character identity-dossier image of a single subject.",
     `Character: ${context.characterName}${context.characterCode ? ` (${context.characterCode})` : ""}.`,
     `Zone: ${context.zoneId} / ${context.zoneLabel}.`,
     context.zoneRole ? `Zone role: ${context.zoneRole}.` : "",
     `Requested improvement: ${context.instruction}`,
     referencePrompt ? `Reference-derived visual brief: ${referencePrompt}` : "",
-    `Identity lock: ${contract}`,
+    `Identity lock: ${contract} Keep the same single subject identity, proportions, colors, and signature details as the source.`,
     cropText,
-    `Output composition: a clean single-zone image, ${context.aspect} aspect intent, plain soft gray studio background, no contact-sheet grid, no labels, no captions, no UI, no watermark.`,
+    `Output composition: one clean single-subject image, ${context.aspect} aspect intent, subject centered and fully in frame, plain soft light-gray seamless studio background, even neutral studio lighting.`,
+    `Strictly NO contact-sheet grid, no collage, no side-by-side panels, no split frames, no text, no labels, no captions, no numbers, no annotations, no borders with text, no UI, and no watermark.`,
     context.negativePrompt ? `Negative prompt: ${context.negativePrompt}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -1293,7 +1297,7 @@ function characterSheetContext(input, mediaBaseUrl) {
       prompt: String(z.prompt || z.instruction || z.role || z.label || "").trim(),
     }))
     .filter((z) => z.id && z.prompt)
-    .slice(0, 15);
+    .slice(0, 9);
   if (!zones.length) {
     throw httpError(400, "zones_required", "At least one zone is required.");
   }
@@ -1303,69 +1307,50 @@ function characterSheetContext(input, mediaBaseUrl) {
     negativePrompt,
     sourceUrls,
     zones,
-    size: normalizeImageSize(input.size || input.output_size),
+    size: normalizeImageSize(input.size || input.output_size || arkSheetSize),
     seed: clampInt(input.seed, -1, 4_294_967_295, -1),
     tag: String(input.tag || input.cloud_tag || "design").trim(),
   };
 }
 
-function buildCharacterSheetPrompt(ctx) {
+function buildCharacterSheetPrompt(ctx, grid) {
+  const { rows, cols } = grid;
   const contract = ctx.identityContract.length
     ? ctx.identityContract.join(" ")
     : "Keep the exact same single subject identity from the reference: same face, hair, body proportions, skin tone, outfit, colors, and signature details.";
   return [
-    `Generate ${ctx.zones.length} separate, distinct photorealistic identity-reference images of the SAME single subject shown in the reference image(s). Only the camera view / framing changes between images — the subject's identity must stay identical in every one.`,
-    `Identity lock: ${contract}`,
-    `Produce exactly one image per item below, in this exact order:`,
-    ...ctx.zones.map((z, i) => `Image ${i + 1} — ${z.label}: ${z.prompt}`),
-    `Each image: a single subject only, centered, plain soft light-gray seamless studio background, even neutral studio lighting, the described framing fully in frame. No text, labels, captions, numbering, collage, side-by-side panels, split frames, watermark, or UI.`,
+    `Generate ONE single square photorealistic character contact sheet of the SAME single subject shown in the reference image(s).`,
+    `Layout: a strict, uniform ${rows} by ${cols} grid (${rows} rows, ${cols} columns) that fills the entire square canvas edge-to-edge. Every cell is an equal rectangle of identical size, arranged on a perfectly aligned grid, separated only by thin even neutral gutters. No empty cells, no offset rows, no overlap, no collage scatter.`,
+    `Across every cell the subject's identity is IDENTICAL — only the camera view / framing changes per cell. Identity lock: ${contract}`,
+    `Fill the cells left-to-right, top-to-bottom, in this exact order:`,
+    ...ctx.zones.map((z, i) => {
+      const r = Math.floor(i / cols);
+      const c = i % cols;
+      return `Cell ${i + 1} (row ${r + 1}, col ${c + 1}): ${z.label} — ${z.prompt}`;
+    }),
+    `Each cell: a single subject only, centered within its cell, plain soft light-gray seamless studio background, even neutral studio lighting, the described framing fully in frame and not cropped at the cell edges.`,
+    `Absolutely NO text, no labels, no captions, no titles, no numbers, no annotations, no arrows, no rulers, no UI, no watermark, no logos, and no drawn borders or frames with text. Only the photographic subject and clean neutral gutters between cells.`,
     ctx.negativePrompt ? `Avoid: ${ctx.negativePrompt}` : "",
   ].filter(Boolean).join("\n");
 }
 
-function extractGeneratedImageList(raw) {
-  const items = [
-    ...(Array.isArray(raw.data) ? raw.data : []),
-    ...(Array.isArray(raw.images) ? raw.images : []),
-  ].filter(Boolean);
-  const out = [];
-  for (const item of items) {
-    if (typeof item === "string") {
-      if (item.startsWith("data:")) out.push({ dataUrl: item });
-      else if (/^https?:\/\//i.test(item)) out.push({ url: item });
-      continue;
-    }
-    const url = item?.url || item?.image_url || item?.imageUrl || item?.output_url || item?.outputUrl;
-    if (typeof url === "string" && url) {
-      out.push({ url });
-      continue;
-    }
-    const b64 = item?.b64_json || item?.b64Json || item?.base64 || item?.image_base64;
-    if (typeof b64 === "string" && b64) {
-      const mime = item?.mime || item?.content_type || "image/jpeg";
-      out.push({ dataUrl: `data:${mime};base64,${b64.replace(/^data:[^,]+,/, "")}` });
-    }
-  }
-  return out;
-}
-
 async function generateCharacterSheet(rawInput, mediaBaseUrl = publicBaseUrl) {
   const ctx = characterSheetContext(rawInput, mediaBaseUrl);
+  const cols = 3;
+  const rows = Math.ceil(ctx.zones.length / cols);
+  const grid = { rows, cols };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), arkImageGridTimeoutMs);
   timeout.unref?.();
   try {
-    const prompt = buildCharacterSheetPrompt(ctx);
-    const maxImages = clampInt(ctx.zones.length, 1, arkImageGridMaxImages, ctx.zones.length);
+    const prompt = buildCharacterSheetPrompt(ctx, grid);
     const requestBody = {
       model: arkImageModel,
       prompt,
-      image: ctx.sourceUrls.slice(0, 10),
-      sequential_image_generation: "auto",
-      sequential_image_generation_options: { max_images: Math.max(maxImages, ctx.zones.length) },
+      image: ctx.sourceUrls.slice(0, 8),
+      sequential_image_generation: "disabled",
       response_format: "url",
       size: ctx.size,
-      stream: false,
       watermark: false,
     };
     if (ctx.seed >= 0) requestBody.seed = ctx.seed;
@@ -1374,28 +1359,41 @@ async function generateCharacterSheet(rawInput, mediaBaseUrl = publicBaseUrl) {
       signal: controller.signal,
       body: JSON.stringify(requestBody),
     });
-    const generatedList = extractGeneratedImageList(raw);
-    const zones = [];
-    for (let i = 0; i < ctx.zones.length && i < generatedList.length; i++) {
-      const z = ctx.zones[i];
-      const name = cleanImageUploadName(`${ctx.characterName || "character"}-${z.id}-${Date.now()}.jpg`, ".jpg");
-      const r = await persistGeneratedImage(generatedList[i], name, ctx.tag, controller.signal);
-      zones.push({ zone_id: z.id, label: z.label, image: r.image, persisted: r.persisted, temporary: r.temporary, persist_error: r.persistError });
+    const generated = extractGeneratedImage(raw);
+    const name = cleanImageUploadName(`${ctx.characterName || "character"}-sheet-${Date.now()}.jpg`, ".jpg");
+    const persistResult = await persistGeneratedImage(generated, name, ctx.tag, controller.signal);
+
+    const sheetUrl = persistResult.image?.url || generated.url || null;
+    let dataUrl = generated.dataUrl || null;
+    if (!dataUrl) {
+      try {
+        dataUrl = await imageUrlToDataUrl(generated.url || sheetUrl, "Character sheet", controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        console.warn("character sheet data url failed", publicError(error));
+        dataUrl = null;
+      }
     }
-    const returnedIds = new Set(zones.map((z) => z.zone_id));
-    const missing = ctx.zones.filter((z) => !returnedIds.has(z.id)).map((z) => z.id);
+
     return {
       ok: true,
       model: arkImageModel,
       size: ctx.size,
       seed: ctx.seed,
+      grid,
+      sheet: {
+        url: sheetUrl,
+        data_url: dataUrl,
+        persisted: persistResult.persisted,
+      },
+      cells: ctx.zones.map((z, i) => ({
+        zone_id: z.id,
+        label: z.label,
+        index: i,
+        row: Math.floor(i / cols),
+        col: i % cols,
+      })),
       prompt,
-      requested: ctx.zones.length,
-      generated: generatedList.length,
-      zones,
-      missing,
-      partial: zones.length < ctx.zones.length,
-      persisted: zones.length > 0 && zones.every((z) => z.persisted),
     };
   } catch (error) {
     if (controller.signal.aborted && !error.status) {
@@ -2089,6 +2087,89 @@ async function handleCharacterSheet(req, res) {
   sendJson(res, 201, payload);
 }
 
+async function handleCharacterDesignClaim(req, res) {
+  const input = await readJson(req);
+  const characterId = String(input.character_id || input.characterId || "").trim();
+  const zoneId = String(input.zone_id || input.zoneId || "").trim();
+  const label = String(input.label || input.zone_label || input.zoneLabel || "").trim();
+  if (!characterId || !zoneId) {
+    throw httpError(400, "claim_target_required", "character_id and zone_id are required to mint a claim.");
+  }
+  const claim = mintDesignClaim(characterId, zoneId, label);
+  const mcpUrl = (publicBaseUrl || requestPublicBaseUrl(req)) + "/mcp";
+  sendJson(res, 201, {
+    token: claim.token,
+    mcp_url: mcpUrl,
+    tool: "deliver_character_zone",
+    expires_in: Math.floor(designClaimTtlMs / 1000),
+  });
+}
+
+function handleCharacterDesignInbox(req, res, url) {
+  pruneDesignState();
+  const since = clampInt(url.searchParams.get("since"), 0, Number.MAX_SAFE_INTEGER, 0);
+  const deliveries = designDeliveries
+    .filter((d) => d.deliveredAt > since)
+    .map((d) => ({
+      id: d.id,
+      character_id: d.characterId,
+      zone_id: d.zoneId,
+      image: d.image,
+      note: d.note,
+      delivered_at: d.deliveredAt,
+    }));
+  sendJson(res, 200, { deliveries, now: Date.now() });
+}
+
+async function handleCharacterDesignSheetProxy(req, res, url) {
+  const target = String(url.searchParams.get("url") || "").trim();
+  if (!/^https?:\/\//i.test(target)) {
+    throw httpError(400, "url_required", "A valid http(s) url query parameter is required.");
+  }
+  let targetHost = "";
+  try { targetHost = new URL(target).hostname.toLowerCase(); } catch { targetHost = ""; }
+  let repoHost = "";
+  try { repoHost = new URL(imageRepoBaseUrl).hostname.toLowerCase(); } catch { repoHost = ""; }
+  const hostAllowed = Boolean(targetHost) && (
+    targetHost === repoHost ||
+    targetHost.endsWith(".volces.com")
+  );
+  if (!hostAllowed) {
+    throw httpError(400, "url_not_allowed", "Sheet proxy only fetches Studio image hosts.");
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), arkTitleImageFetchTimeoutMs);
+  timeout.unref?.();
+  try {
+    const upstream = await fetch(target, { signal: controller.signal });
+    if (!upstream.ok) {
+      throw httpError(upstream.status || 502, "sheet_proxy_failed", `Could not fetch the sheet image (HTTP ${upstream.status}).`);
+    }
+    const contentType = String(upstream.headers.get("content-type") || mimeFromImageUrl(target)).split(";")[0].trim() || "image/jpeg";
+    if (!contentType.startsWith("image/")) {
+      throw httpError(502, "sheet_proxy_not_image", "Proxied response was not an image.");
+    }
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    if (buffer.length > maxImageBytes) {
+      throw httpError(413, "sheet_proxy_too_large", "Sheet image is larger than MAX_IMAGE_BYTES.");
+    }
+    res.writeHead(200, {
+      "content-type": contentType,
+      "content-length": buffer.length,
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    res.end(buffer);
+  } catch (error) {
+    if (controller.signal.aborted && !error.status) {
+      throw httpError(504, "sheet_proxy_timeout", "Sheet image proxy timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function handleListImages(req, res, url) {
   const limit = clampInt(url.searchParams.get("limit"), 1, 100, 100);
   const cursor = url.searchParams.get("cursor") || "";
@@ -2376,6 +2457,50 @@ async function handleListTasks(req, res) {
   sendJson(res, 200, { tasks: items });
 }
 
+const designClaims = new Map();
+const designDeliveries = [];
+
+function pruneDesignState(now = Date.now()) {
+  for (const [token, claim] of designClaims) {
+    if (claim.expiresAt <= now) designClaims.delete(token);
+  }
+  if (designDeliveries.length) {
+    const cutoff = now - designInboxTtlMs;
+    let drop = 0;
+    while (drop < designDeliveries.length && designDeliveries[drop].deliveredAt <= cutoff) drop++;
+    if (drop > 0) designDeliveries.splice(0, drop);
+  }
+}
+
+function mintDesignClaim(characterId, zoneId, label) {
+  const now = Date.now();
+  const claim = {
+    token: "clm_" + randomUUID().replace(/-/g, "").slice(0, 24),
+    characterId: String(characterId || "").trim(),
+    zoneId: String(zoneId || "").trim(),
+    label: String(label || zoneId || "").trim(),
+    createdAt: now,
+    expiresAt: now + designClaimTtlMs,
+    used: false,
+  };
+  designClaims.set(claim.token, claim);
+  return claim;
+}
+
+function resolveDesignClaim(token) {
+  const key = String(token || "").trim();
+  if (!key) return null;
+  pruneDesignState();
+  const claim = designClaims.get(key);
+  if (!claim) return null;
+  if (claim.used) return null;
+  if (claim.expiresAt <= Date.now()) {
+    designClaims.delete(key);
+    return null;
+  }
+  return claim;
+}
+
 function mcpAuthorized(req, url) {
   if (!process.env.MCP_TOKEN) return true;
   const header = String(req.headers.authorization || "");
@@ -2546,6 +2671,21 @@ function mcpTools() {
         additionalProperties: true,
       },
     },
+    {
+      name: "deliver_character_zone",
+      description: "Deliver one finished character-design zone image back to the Studio website using a single-use claim token issued by the website. Provide image_url (a public https URL you uploaded to your cloud) OR image (a JPEG/PNG/WEBP data URL to upload). The image is pushed to the website inbox and applied to the claimed character zone. The claim token is single-use and short-lived.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          claim_token: { type: "string", description: "Single-use claim token issued by the Studio website for one character zone." },
+          image_url: { type: "string", description: "Public https URL of the finished image you uploaded to your cloud." },
+          image: { type: "string", description: "Optional JPEG/PNG/WEBP data URL of the finished image to upload to Cloud instead of image_url." },
+          note: { type: "string", description: "Optional note describing the delivery." },
+        },
+        required: ["claim_token"],
+        additionalProperties: true,
+      },
+    },
   ];
 }
 
@@ -2624,13 +2764,55 @@ async function callMcpTool(name, args = {}) {
     return mcpTextResult(out);
   }
 
+  if (name === "deliver_character_zone") {
+    const claim = resolveDesignClaim(args.claim_token || args.claimToken);
+    if (!claim) {
+      throw httpError(401, "invalid_or_expired_claim", "The claim token is invalid, used, or expired.");
+    }
+    let imageUrl = "";
+    const dataImage = args.image || args.data_url;
+    if (typeof dataImage === "string" && dataImage.startsWith("data:")) {
+      const uploaded = await uploadImageToRepo(dataImage, `bot-${claim.zoneId}.jpg`, "Bot delivery", "design");
+      if (!uploaded?.url) {
+        throw httpError(400, "image_invalid", "Image must be a JPEG, PNG, or WEBP data URL.");
+      }
+      imageUrl = uploaded.url;
+    } else {
+      imageUrl = String(args.image_url || args.imageUrl || "").trim();
+      if (!/^https:\/\//i.test(imageUrl)) {
+        throw httpError(400, "image_url_required", "Provide a public https image_url or an image data URL.");
+      }
+    }
+    claim.used = true;
+    const delivery = {
+      id: "dlv_" + randomUUID(),
+      characterId: claim.characterId,
+      zoneId: claim.zoneId,
+      image: {
+        url: imageUrl,
+        name: `bot-${claim.zoneId}.jpg`,
+        provider: "bot",
+        cloud: true,
+        temporary: false,
+      },
+      note: String(args.note || "").trim() || null,
+      deliveredAt: Date.now(),
+    };
+    designDeliveries.push(delivery);
+    pruneDesignState();
+    return mcpTextResult({ ok: true, delivered: true, zone_id: claim.zoneId });
+  }
+
   throw httpError(404, "tool_not_found", `Unknown MCP tool: ${name}`);
 }
 
-async function handleMcpRpc(message) {
+const SCOPED_MCP_TOOL = "deliver_character_zone";
+
+async function handleMcpRpc(message, scope = {}) {
   const id = message?.id;
   const method = message?.method;
   const params = message?.params || {};
+  const scoped = Boolean(scope.scoped);
 
   try {
     if (method === "initialize") {
@@ -2654,11 +2836,21 @@ async function handleMcpRpc(message) {
     }
 
     if (method === "tools/list") {
-      return { jsonrpc: "2.0", id, result: { tools: mcpTools() } };
+      const tools = scoped ? mcpTools().filter((tool) => tool.name === SCOPED_MCP_TOOL) : mcpTools();
+      return { jsonrpc: "2.0", id, result: { tools } };
     }
 
     if (method === "tools/call") {
-      const result = await callMcpTool(params.name, params.arguments || {});
+      const args = { ...(params.arguments || {}) };
+      if (scoped) {
+        if (params.name !== SCOPED_MCP_TOOL) {
+          throw httpError(401, "unauthorized", "This claim token may only call deliver_character_zone.");
+        }
+        if (!args.claim_token && !args.claimToken && scope.bearerClaim) {
+          args.claim_token = scope.bearerClaim;
+        }
+      }
+      const result = await callMcpTool(params.name, args);
       return { jsonrpc: "2.0", id, result };
     }
 
@@ -2680,11 +2872,33 @@ async function handleMcpRpc(message) {
   }
 }
 
-async function handleMcp(req, res, url) {
-  if (!mcpAuthorized(req, url)) {
-    sendJson(res, 401, { error: { code: "unauthorized", message: "Invalid MCP token." } });
-    return;
+function mcpBearer(req) {
+  const header = String(req.headers.authorization || "");
+  return header.match(/^Bearer\s+(.+)$/i)?.[1] || "";
+}
+
+// A scoped JSON-RPC message is permitted for a claim-token bearer when it is
+// one of the handshake methods, a tools/list, or a tools/call for the single
+// deliver_character_zone tool with a valid claim (bearer claim or claim_token arg).
+function scopedMcpMessageAllowed(message, bearerClaim) {
+  const method = message?.method;
+  if (method === "initialize" || method === "ping" || method === "notifications/initialized" || method === "tools/list") {
+    return true;
   }
+  if (method === "tools/call") {
+    const params = message?.params || {};
+    if (params.name !== SCOPED_MCP_TOOL) return false;
+    const args = params.arguments || {};
+    const token = args.claim_token || args.claimToken || bearerClaim;
+    return Boolean(resolveDesignClaim(token));
+  }
+  return false;
+}
+
+async function handleMcp(req, res, url) {
+  const master = mcpAuthorized(req, url);
+  const bearer = mcpBearer(req);
+  const bearerClaim = !master && bearer.startsWith("clm_") && resolveDesignClaim(bearer) ? bearer : "";
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
@@ -2697,6 +2911,13 @@ async function handleMcp(req, res, url) {
   }
 
   if (req.method === "GET") {
+    // Master callers see the full tool list; a valid claim-token bearer sees
+    // only the scoped delivery tool. Anyone else is rejected.
+    if (!master && !bearerClaim) {
+      sendJson(res, 401, { error: { code: "unauthorized", message: "Invalid MCP token." } });
+      return;
+    }
+    const advertised = master ? mcpTools() : mcpTools().filter((tool) => tool.name === SCOPED_MCP_TOOL);
     res.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache",
@@ -2705,7 +2926,7 @@ async function handleMcp(req, res, url) {
     res.write("event: endpoint\n");
     res.write("data: /mcp\n\n");
     res.write("event: tools\n");
-    res.write(`data: ${JSON.stringify({ tools: mcpTools().map((tool) => tool.name) })}\n\n`);
+    res.write(`data: ${JSON.stringify({ tools: advertised.map((tool) => tool.name) })}\n\n`);
     res.end();
     return;
   }
@@ -2717,7 +2938,29 @@ async function handleMcp(req, res, url) {
 
   const body = await readJson(req);
   const batch = Array.isArray(body) ? body : [body];
-  const responses = (await Promise.all(batch.map(handleMcpRpc))).filter(Boolean);
+
+  if (!master) {
+    // Scoped access: the caller must present a valid claim (bearer claim token or
+    // a claim_token argument on a deliver call), and every message in the batch
+    // must be allowed for that scoped claim-token caller.
+    const presentsClaim =
+      Boolean(bearerClaim) ||
+      batch.some((message) => {
+        const args = message?.params?.arguments || {};
+        return Boolean(resolveDesignClaim(args.claim_token || args.claimToken));
+      });
+    const allowed =
+      presentsClaim &&
+      batch.length > 0 &&
+      batch.every((message) => scopedMcpMessageAllowed(message, bearerClaim));
+    if (!allowed) {
+      sendJson(res, 401, { error: { code: "unauthorized", message: "Invalid MCP token." } });
+      return;
+    }
+  }
+
+  const scope = { scoped: !master, bearerClaim };
+  const responses = (await Promise.all(batch.map((message) => handleMcpRpc(message, scope)))).filter(Boolean);
 
   if (responses.length === 0) {
     res.writeHead(202, { "cache-control": "no-store" });
@@ -2779,6 +3022,21 @@ async function routeApi(req, res, url) {
 
     if (url.pathname === "/api/character-design/sheet" && req.method === "POST") {
       await handleCharacterSheet(req, res);
+      return true;
+    }
+
+    if (url.pathname === "/api/character-design/claim" && req.method === "POST") {
+      await handleCharacterDesignClaim(req, res);
+      return true;
+    }
+
+    if (url.pathname === "/api/character-design/inbox" && req.method === "GET") {
+      handleCharacterDesignInbox(req, res, url);
+      return true;
+    }
+
+    if (url.pathname === "/api/character-design/sheet-proxy" && req.method === "GET") {
+      await handleCharacterDesignSheetProxy(req, res, url);
       return true;
     }
 

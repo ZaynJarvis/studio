@@ -193,19 +193,46 @@ function agentDotStatus(agent) {
   return 'online';
 }
 
-function buildInjectedContext(sourceUrl, referencedText, includeUrl) {
+function escapeContextAttr(value = '', limit = 1600) {
+  return compactText(value, limit)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildMcpDeliveryBlock(mcp, sourceImage, improvement) {
+  const endpoint = compactText(mcp?.endpoint, 1600);
+  const token = compactText(mcp?.token, 200);
+  const tool = compactText(mcp?.tool, 120) || 'deliver_character_zone';
+  if (!endpoint || !token) return null;
+  const lines = [];
+  if (sourceImage) lines.push(`  <source-image>${escapeContextText(sourceImage, 1600)}</source-image>`);
+  if (improvement) lines.push(`  <improvement>${escapeContextText(improvement)}</improvement>`);
+  lines.push(`  <deliver-via-mcp endpoint="${escapeContextAttr(endpoint)}" token="${escapeContextAttr(token, 200)}" tool="${escapeContextAttr(tool, 120)}">`);
+  lines.push('  Steps for you, the agent: (1) use your imagegen tool with the source-image and the improvement to produce the improved image; (2) upload it to a public URL (your cloud); (3) call the MCP server at endpoint, Authorization: Bearer &lt;token&gt;, JSON-RPC tools/call name "deliver_character_zone" arguments { "claim_token":"&lt;token&gt;", "image_url":"&lt;your public url&gt;" }. The token is single-use and expires in 30 min. Deliver exactly one final image.');
+  lines.push('  </deliver-via-mcp>');
+  return lines.join('\n');
+}
+
+function buildInjectedContext(sourceUrl, referencedText, includeUrl, mcp, sourceImage, improvement) {
+  const mcpBlock = buildMcpDeliveryBlock(mcp, sourceImage, improvement);
   const lines = ['<zouk-context>'];
-  if (includeUrl) lines.push(`  <url>${escapeContextText(sourceUrl, 1600)}</url>`);
-  const reference = compactText(referencedText);
-  if (reference) lines.push(`  <referenced-text>${escapeContextText(reference)}</referenced-text>`);
+  if (mcpBlock) {
+    lines.push(mcpBlock);
+  } else {
+    if (includeUrl) lines.push(`  <url>${escapeContextText(sourceUrl, 1600)}</url>`);
+    const reference = compactText(referencedText);
+    if (reference) lines.push(`  <referenced-text>${escapeContextText(reference)}</referenced-text>`);
+  }
   lines.push('</zouk-context>');
   return lines.join('\n');
 }
 
-function messageWithInjectedContext(message, sourceUrl, referencedText, includeUrl, shouldInject) {
+function messageWithInjectedContext(message, sourceUrl, referencedText, includeUrl, shouldInject, mcp, sourceImage, improvement) {
   const trimmed = message.trim();
   if (!shouldInject) return trimmed;
-  return `${buildInjectedContext(sourceUrl, referencedText, includeUrl)}\n\n${trimmed}`;
+  return `${buildInjectedContext(sourceUrl, referencedText, includeUrl, mcp, sourceImage, improvement)}\n\n${trimmed}`;
 }
 
 function parseInjectedMessage(content) {
@@ -217,9 +244,18 @@ function parseInjectedMessage(content) {
     const tagMatch = markup.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
     return tagMatch ? unescapeContextText(tagMatch[1].trim()) : '';
   };
+  const mcpMatch = markup.match(/<deliver-via-mcp\b([^>]*)>/i);
+  const readAttr = (attr) => {
+    if (!mcpMatch) return '';
+    const attrMatch = mcpMatch[1].match(new RegExp(`${attr}="([^"]*)"`, 'i'));
+    return attrMatch ? unescapeContextText(attrMatch[1].trim()) : '';
+  };
   const context = [
     { key: 'url', value: readTag('url') },
     { key: 'referenced', value: readTag('referenced-text') },
+    { key: 'source-image', value: readTag('source-image') },
+    { key: 'improvement', value: readTag('improvement') },
+    { key: 'deliver-via-mcp', value: readAttr('endpoint') },
   ].filter((item) => item.value);
   return { context: context.length ? context : null, body: text.slice(xmlMatch[0].length).trimStart() };
 }
@@ -480,13 +516,20 @@ export function ZoukStudioChat({ route }) {
     if (!trimmed || !token || status === 'sending') return;
     const nextSourceUrl = context.sourceUrl || rememberSource();
     const nextReferencedText = compactText(context.referencedText ?? selectedText);
+    const nextMcp = context.mcp || null;
+    const hasMcp = Boolean(nextMcp?.endpoint && nextMcp?.token);
+    const nextSourceImage = compactText(context.sourceImage || '', 1600);
+    const nextImprovement = compactText(context.improvement || '');
     const nextIncludeUrl = Boolean(nextSourceUrl && (nextSourceUrl !== lastContextUrl || nextReferencedText));
     const content = messageWithInjectedContext(
       trimmed,
       nextSourceUrl,
       nextReferencedText,
       nextIncludeUrl,
-      nextIncludeUrl || Boolean(nextReferencedText),
+      hasMcp || nextIncludeUrl || Boolean(nextReferencedText),
+      hasMcp ? nextMcp : null,
+      nextSourceImage,
+      nextImprovement,
     );
     setStatus('sending');
     setError('');
@@ -515,6 +558,9 @@ export function ZoukStudioChat({ route }) {
       if (!message) return;
       const nextSourceUrl = detail.sourceUrl || currentSourceUrl();
       const nextReferencedText = compactText(detail.referencedText || '');
+      const nextMcp = detail.mcp && detail.mcp.endpoint && detail.mcp.token ? detail.mcp : null;
+      const nextSourceImage = compactText(detail.sourceImage || '', 1600);
+      const nextImprovement = compactText(detail.improvement || '');
 
       setSourceUrl(nextSourceUrl);
       setSelectedText(nextReferencedText);
@@ -525,6 +571,9 @@ export function ZoukStudioChat({ route }) {
           message,
           sourceUrl: nextSourceUrl,
           referencedText: nextReferencedText,
+          mcp: nextMcp,
+          sourceImage: nextSourceImage,
+          improvement: nextImprovement,
         };
       } else {
         pendingAutoSendRef.current = null;
